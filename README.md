@@ -2,9 +2,10 @@
 
 A lean, fast **edge firewall** for vanilla nginx, built as a dynamic C module
 plus the stock `ngx_mail` proxy, sharing a single IP-reputation core. It is
-*not* a heavy WAF — it is a slim edge filter: scanner/bot path blocking,
-Apache fingerprint spoofing, libloc-based geo/reputation filtering, and
-SMTP protection driven by the same reputation engine.
+*not* a heavy WAF — it is a slim edge filter: scanner path blocking,
+User-Agent classification (the `$waf_type` variable), Apache fingerprint
+spoofing, libloc-based geo/reputation filtering (block- **or** allow-list),
+and HTTP + SMTP + stream (L4) protection driven by the same reputation engine.
 
 It replaces a legacy `nginx-firewall.conf` (~130 location-based scanner
 rules riddled with over-broad prefixes, unanchored substring matches, and
@@ -26,9 +27,10 @@ dead rules) with compiled, anchored, hot-reloadable rules.
   database is read-only (shared across workers via fork copy-on-write),
   every list/pattern is resolved at configuration time, and workers are
   stateless with respect to each other.
-- **One reputation engine, two heads.** The HTTP `PREACCESS` handler and
-  the SMTP `auth_http` endpoint call the *same*
-  `ngx_http_waf_reputation_check()`.
+- **One reputation engine, three heads.** The HTTP `PREACCESS` handler, the
+  SMTP `auth_http` endpoint, and the stream (L4) `ACCESS` handler all call
+  the *same* `ngx_http_waf_reputation_check()` on the client IP. The inputs
+  live in a shared `ngx_waf_rep_conf_t` embedded in each head's config.
 
 
 ## Repository layout
@@ -38,16 +40,23 @@ dead rules) with compiled, anchored, hot-reloadable rules.
 ├── CMakeLists.txt               super-build: fetch + build OpenSSL/zlib-ng/nginx
 ├── cmake/Versions.cmake         pinned PKG_* versions, URLs, SHA256 hashes
 ├── modules/ngx_http_waf/        the dynamic module
-│   ├── config                   nginx addon build descriptor
+│   ├── config                   nginx addon build descriptor (one .so, 2 modules)
 │   ├── scanners.list            scanner path patterns (hot-reloadable)
+│   ├── lists/                   UA signature lists (hot-reloadable)
+│   │   ├── scanner-ua.list         security tools  -> $waf_type=scanner
+│   │   ├── ai-crawler.list         LLM/AI crawlers -> $waf_type=ai-crawler
+│   │   ├── crawler.list            search engines  -> $waf_type=crawler
+│   │   └── bot.list                social/monitor/HTTP libs -> $waf_type=bot
 │   └── src/
-│       ├── ngx_http_waf_module.c  module glue: directives, phases, merge
-│       ├── ngx_http_waf.h         shared types / loc_conf
-│       ├── waf_match.{c,h}         scanner regex buckets + bot heuristics
+│       ├── ngx_http_waf_module.c  HTTP module glue: directives, phases, merge
+│       ├── ngx_http_waf.h         shared HTTP types / loc_conf
+│       ├── waf_match.{c,h}         scanner regex buckets + UA classification
 │       ├── waf_spoof.{c,h}         Apache Server header + error-page spoof
 │       ├── waf_geo.{c,h}           libloc location.db mmap reader
+│       ├── waf_rep.h               shared rep_conf + reputation prototypes
 │       ├── waf_reputation.{c,h}    shared reputation core + config helpers
-│       └── waf_authhttp.{c,h}      ngx_mail auth_http content handler
+│       ├── waf_authhttp.{c,h}      ngx_mail auth_http content handler
+│       └── waf_stream.c            ngx_stream_waf_module (L4 reputation head)
 ├── geodb/
 │   ├── location.db              IPFire libloc database (uncompressed)
 ├── reference/                   nanolibloc.c (basis), loctest.c (geo oracle)
@@ -165,19 +174,28 @@ load_module /path/to/sandbox/modules/ngx_http_waf_module.so;
 
 ### Directive reference
 
-All directives are valid in `http`, `server`, and `location` contexts and
-inherit downward (merge), **except** `waf_mail_auth`, which is
-`location`-only. `waf_blocklist`/`waf_allowlist`/`waf_trusted_proxy` take a
-single CIDR each but may be repeated to build up a list.
+The directives below are the **HTTP** set: valid in `http`, `server`, and
+`location` contexts, inheriting downward (merge), **except** `waf_mail_auth`,
+which is `location`-only. `waf_blocklist`/`waf_allowlist`/`waf_trusted_proxy`
+take a single CIDR each but may be repeated to build up a list. The reputation
+and geo directives are mirrored in the **stream** context for the L4 head —
+see [Stream (L4) protection](#stream-l4-protection). UA classification always
+runs and is exposed as the [`$waf_type`](#user-agent-classification-waf_type)
+variable, independent of `waf` / `waf_bot_block`.
 
 | Directive | Args | Default | Purpose |
 |---|---|---|---|
-| `waf` | `on`\|`off` | `off` | Master switch for the HTTP `POST_READ` + `PREACCESS` handlers (reputation, bot, scanner). Does **not** gate spoofing. |
-| `waf_bot_block` | `on`\|`off` | `off` | Block known scanner User-Agents and empty/missing UA (→ 404). |
-| `waf_scanner_list` | `<path>` | — | Load scanner path patterns from a file (compiled into action buckets). |
+| `waf` | `on`\|`off` | `off` | Master switch for the HTTP `POST_READ` + `PREACCESS` handlers (reputation, UA block, scanner). Does **not** gate spoofing or `$waf_type` classification. |
+| `waf_bot_block` | `on`\|`off` | `off` | Block only **hostile** User-Agents: `scanner` tools and empty/missing UA (→ 404). `crawler`/`ai-crawler`/`bot` are classified into `$waf_type` but **never** blocked by this flag. |
+| `waf_scanner_list` | `<path>` | — | Load scanner **path** patterns from a file (compiled into action buckets). |
+| `waf_scanner_ua_list` | `<path>` | — | UA signatures for security tools → `$waf_type=scanner`. |
+| `waf_ai_crawler_list` | `<path>` | — | UA signatures for LLM/AI crawlers → `$waf_type=ai-crawler`. |
+| `waf_crawler_list` | `<path>` | — | UA signatures for search-engine/archival crawlers → `$waf_type=crawler`. |
+| `waf_bot_list` | `<path>` | — | UA signatures for social/monitor/feed/HTTP-library clients → `$waf_type=bot`. |
 | `waf_server_token` | `<string>` | `Apache/2.4.68 (Unix)` | The fake `Server:` token and the error-page fingerprint. |
 | `waf_geo_db` | `<path>` | — | Path to the libloc `location.db` (mmap'd read-only). |
-| `waf_geo_block` | `<CC> …` | — | Block these country codes (ISO-3166 two-letter, plus IPFire specials A1/A2/A3/T1/XD). |
+| `waf_geo_block` | `<CC> …` | — | Block these country codes (ISO-3166 two-letter, plus IPFire specials A1/A2/A3/T1/XD) → 403. |
+| `waf_geo_whitelist` | `<CC> …` | — | **Allow only** these countries; every other country and any IP with no geo record → 404. Wins over `waf_geo_block`. Repeatable / multi-arg. |
 | `waf_flag_block` | `<flag> …` | — | Block by libloc network flag: `anonymous-proxy` (alias `anon`), `satellite`, `anycast`, `tor`, `drop`. |
 | `waf_trusted_proxy` | `<cidr>` | — | Trust `X-Forwarded-For` only from these peers when deriving the canonical client IP. |
 | `waf_blocklist` | `<cidr>` | — | Statically deny this network (→ 403). Repeatable. |
@@ -215,10 +233,70 @@ Example:
 ^/owa 444
 ```
 
-The bot User-Agent signatures (sqlmap, nikto, nmap, masscan, zgrab, nuclei,
-dirbuster, gobuster, wpscan, acunetix, nessus, netsparker, fimap, hydra,
-arachni, dirsearch) are compiled into the module and matched as
-case-insensitive substrings; `waf_bot_block on` enables them.
+### User-Agent classification (`$waf_type`)
+
+Every request's `User-Agent` is classified into exactly one bucket, exposed
+as the **`$waf_type`** nginx variable. Classification is **decoupled from
+blocking**: it always runs (even under `waf off`), and the operator decides
+what to do with each class.
+
+| `$waf_type` | Source | Blocked by `waf_bot_block`? |
+|---|---|---|
+| `scanner` | `waf_scanner_ua_list` (sqlmap, nikto, nmap, nuclei, …) | **yes** → 404 |
+| `ai-crawler` | `waf_ai_crawler_list` (GPTBot, ClaudeBot, CCBot, Bytespider, …) | no (flag-only) |
+| `crawler` | `waf_crawler_list` (Googlebot, bingbot, Baiduspider, …) | no (flag-only) |
+| `bot` | `waf_bot_list` (facebookexternalhit, curl, python-requests, …) | no (flag-only) |
+| `regular` | no signature matched (assume human) | no |
+| `empty` | missing / empty `User-Agent` | **yes** → 404 |
+
+Lists are matched in **priority order** scanner → ai-crawler → crawler → bot;
+the first hit wins (so `Applebot-Extended` resolves to `ai-crawler`, not the
+`Applebot` token in `crawler.list`). `spider` is **not** a separate class —
+industry practice treats spider ≡ crawler, so spider tokens live in
+`crawler.list`.
+
+**UA list file format** — one case-insensitive PCRE2 fragment per line; blank
+lines and lines starting with `#` are ignored; the whole trimmed line is the
+pattern. Note there is **no** action token and **no inline comments** (`#`
+only starts a comment at the beginning of a line). Each list compiles to one
+alternation regex (a single exec per category) and is **hot-reloadable**.
+
+```
+# bot.list (excerpt) -- full-line comments only, one fragment per line
+facebookexternalhit
+python-requests
+curl/
+^Java/
+Apache-HttpClient
+```
+
+In the excerpt above, `curl/` matches `curl/8.5.0` (the `/` is a literal), and
+`^Java/` anchors at the start of the UA so it matches `Java/1.8` but not a
+browser that merely mentions "java" elsewhere.
+
+> **Watch-outs.** Tokens are regex fragments: `.` and `/` are significant
+> (escape `\.` for a literal dot when you need precision — over-matching is
+> usually harmless). **Never** seed a bare `bot`, `spider`, `crawl`, or
+> `Mozilla` token — they false-positive on legitimate clients and on each
+> other. Use the distinctive product/library name.
+
+The `$waf_type` variable is `NOCACHEABLE` and works in `if`, `add_header`,
+`log_format`, `map`, etc. — use it to tag, route, or rate-limit by class
+without blocking:
+
+```nginx
+# surface the classification to upstreams / logs
+add_header X-WAF-Type $waf_type always;
+proxy_set_header X-Client-Class $waf_type;
+
+# e.g. send AI crawlers to a thin/204 location instead of blocking them
+if ($waf_type = ai-crawler) { return 204; }
+```
+
+Seed lists ship in [`modules/ngx_http_waf/lists/`](modules/ngx_http_waf/lists/),
+distilled from Matomo `bots.yml`, monperrus/crawler-user-agents,
+ai.robots.txt, and CrawlerDetect. They drift (AI crawlers especially) — a
+config reload recompiles them, so updates are a reload, not a rebuild.
 
 ### Geo / reputation
 
@@ -230,13 +308,27 @@ curl -fsSL -o geodb/location.db.xz \
 xz -dk geodb/location.db.xz       # -> geodb/location.db
 ```
 
-Reputation is evaluated in this fixed order (any deny wins, allowlist wins
-over everything):
+Reputation is evaluated in this fixed order (allowlist wins over everything;
+the first deny wins):
 
 1. **allowlist** match → allow (short-circuit).
 2. **blocklist** match → 403 (`static blocklist`).
-3. **geo network flag** match (`flag_mask`) → 403 (`network flag`).
-4. **geo country** match (`block_cc`) → 403 (`geo country`).
+3. **no geo record** → allow — **unless** a whitelist is set, then 404
+   (`geo not whitelisted`).
+4. **geo network flag** match (`flag_mask`) → 403 (`network flag`). Applies in
+   both block and whitelist modes.
+5. **geo country**:
+   - **block mode** (`waf_geo_block`): country in the block list → 403
+     (`geo country`).
+   - **whitelist mode** (`waf_geo_whitelist`, which *wins* when set): country
+     **not** in the allow list → 404 (`geo not whitelisted`); `block_cc` is
+     not consulted for the country decision.
+
+The code split is deliberate: **403** for an explicit deny (blocklist / flag /
+geo-block), **404** for a whitelist miss — hide the resource so the client
+cannot tell it is geo-gated. A geo-DB miss in whitelist mode is also a 404.
+The CIDR blocklist and the network-flag check still run **first**, so a
+flagged or blocklisted IP is denied even from a whitelisted country.
 
 The database is `mmap`'d read-only and `munmap`'d on reload, so updating
 it is a config reload — replace `geodb/location.db` atomically and run
@@ -280,15 +372,63 @@ location's `waf_blocklist`/`waf_geo_*` data (reputation is independent of
 the `waf` flag). Bind the endpoint to `127.0.0.1` so it cannot be called
 externally.
 
+### Stream (L4) protection
+
+The third head, `ngx_stream_waf_module`, guards **raw TCP/UDP** stream
+connections — not application traffic. It ships in the *same* `.so` as the
+HTTP module (one `load_module`, see [the build descriptor](modules/ngx_http_waf/config));
+nginx must be built `--with-stream` (it is, in this repo).
+
+At the stream `ACCESS` phase it runs the shared `reputation_check` on the
+connection **peer** (`s->connection->sockaddr`) and closes the connection
+(`NGX_STREAM_FORBIDDEN`) on any non-allow verdict. There is **no
+X-Forwarded-For at L4** — the peer address is used verbatim (already rewritten
+by the stream realip / `proxy_protocol` machinery if you configured it).
+Trusted-proxy / XFF handling is HTTP-only.
+
+The directives live in the `stream` / `server` (stream) context and reuse the
+same reputation/geo semantics as the HTTP head:
+
+| Directive | Args | Purpose |
+|---|---|---|
+| `waf_stream` | `on`\|`off` | Master switch for the stream `ACCESS` handler (default `off`). |
+| `waf_geo_db` | `<path>` | libloc `location.db` for this stream head (mmap'd read-only). |
+| `waf_geo_block` | `<CC> …` | Block these countries → connection dropped. |
+| `waf_geo_whitelist` | `<CC> …` | Allow only these countries (and known IPs); else dropped. Wins over `waf_geo_block`. |
+| `waf_flag_block` | `<flag> …` | Block by libloc network flag (`anycast`, `anonymous-proxy`, …). |
+| `waf_blocklist` | `<cidr>` | Statically deny this network. Repeatable. |
+| `waf_allowlist` | `<cidr>` | Allow this network, short-circuiting reputation. Repeatable. |
+
+There is no UA / scanner / spoofing in the stream head — L4 has no headers or
+request line; it is pure IP reputation. A denied verdict is logged as
+`waf: stream reputation block (<reason>)`.
+
+```nginx
+stream {
+    waf_geo_db     /etc/nginx/geodb/location.db;
+    waf_flag_block anycast;
+
+    server {
+        listen        9000;
+        waf_stream    on;
+        waf_blocklist 203.0.113.0/24;   # dropped at the ACCESS phase, pre-proxy
+        proxy_pass    backend:5432;     # e.g. shield a database / SMTP / game port
+    }
+}
+```
+
 ### Example configuration
 
 A complete, runnable example lives in [`sandbox/nginx.conf`](sandbox/nginx.conf).
-It wires up: the WAF on a public HTTP/2 + HTTP/3 server (ports 8080/8443),
-a localhost-only `auth_http` endpoint (8081), and two SMTP heads — an
-inbound MX (`smtp_auth none`, pure IP reputation) and a submission listener
-(STARTTLS + SMTP AUTH). The sandbox uses high ports (2525/5870) because the
-test nginx runs unprivileged; **production binds 25/587** (needs root or
-`CAP_NET_BIND_SERVICE`).
+It wires up all three heads: the WAF on a public HTTP/2 + HTTP/3 server
+(ports 8080/8443) with the four UA lists loaded, an `X-WAF-Type $waf_type`
+test header, and a `location = /geo-whitelist` demoing whitelist mode; a
+localhost-only `auth_http` endpoint (8081); two SMTP heads — an inbound MX
+(`smtp_auth none`, pure IP reputation) and a submission listener (STARTTLS +
+SMTP AUTH); and a `stream {}` block with two L4 servers (`:9090` blocklisted
+→ dropped, `:9091` allowlisted → proxied). The sandbox uses high ports
+(2525/5870, 8080/8443/9090) because the test nginx runs unprivileged;
+**production binds 25/587** (needs root or `CAP_NET_BIND_SERVICE`).
 
 Minimal HTTP example:
 
@@ -300,8 +440,15 @@ http {
     waf_bot_block     on;
     waf_scanner_list  /etc/nginx/scanners.list;
 
+    # UA classification ($waf_type) — always on, blocking is separate
+    waf_scanner_ua_list /etc/nginx/lists/scanner-ua.list;
+    waf_ai_crawler_list /etc/nginx/lists/ai-crawler.list;
+    waf_crawler_list    /etc/nginx/lists/crawler.list;
+    waf_bot_list        /etc/nginx/lists/bot.list;
+
     waf_geo_db        /etc/nginx/geodb/location.db;
-    waf_geo_block     CN RU;
+    waf_geo_block     CN RU;                 # block mode (403); or, instead:
+    # waf_geo_whitelist HU DE;               # allow-only mode (else 404)
     waf_flag_block    anycast anonymous-proxy;
     waf_trusted_proxy 127.0.0.1;
 
@@ -311,25 +458,71 @@ http {
         http2  on;
         # ...
         location / {
-            add_header Alt-Svc 'h3=":443"; ma=86400';
+            add_header Alt-Svc    'h3=":443"; ma=86400';
+            add_header X-WAF-Type $waf_type always;   # surface the class
         }
     }
 }
 ```
 
 
+### Smoke tests
+
+Against the running sandbox (`sandbox/sbin/nginx -p <abs>/sandbox/ -c
+<abs>/sandbox/nginx.conf`). `waf_trusted_proxy 127.0.0.1` lets the loopback
+tester spoof the client IP via `X-Forwarded-For` for the geo checks.
+
+```sh
+# --- UA classification ($waf_type via the X-WAF-Type test header) ---------
+curl -sI -A 'Googlebot/2.1'        localhost:8080/ | grep -i x-waf-type  # crawler
+curl -sI -A 'GPTBot/1.0'           localhost:8080/ | grep -i x-waf-type  # ai-crawler
+curl -sI -A 'python-requests/2.0'  localhost:8080/ | grep -i x-waf-type  # bot
+curl -so/dev/null -w '%{http_code}\n' -A 'sqlmap/1.5' localhost:8080/    # 404 (scanner)
+curl -so/dev/null -w '%{http_code}\n' -H 'User-Agent;' localhost:8080/    # 404 (empty)
+
+# --- geo whitelist (location = /geo-whitelist allows HU DE) ----------------
+curl -so/dev/null -w '%{http_code}\n' -H 'X-Forwarded-For: 84.206.34.1' \
+     localhost:8080/geo-whitelist        # 200  (HU, whitelisted)
+curl -so/dev/null -w '%{http_code}\n' -H 'X-Forwarded-For: 12.0.0.1' \
+     localhost:8080/geo-whitelist        # 404  (US, not whitelisted)
+curl -so/dev/null -w '%{http_code}\n' -H 'X-Forwarded-For: 1.2.4.8' \
+     localhost:8080/                     # 403  (CN, block mode at /)
+
+# --- stream (L4) head ------------------------------------------------------
+curl -so/dev/null -w '%{http_code}\n' --max-time 5 127.0.0.1:9091/  # 200 (allowlisted -> proxied)
+curl -so/dev/null -w '%{http_code}\n' --max-time 5 127.0.0.1:9090/  # 000, exit 56 (blocklisted -> dropped)
+```
+
+To pick known-country test IPs, build the geo oracle and query the DB:
+`cc -O2 -o /tmp/loctest reference/loctest.c && /tmp/loctest geodb/location.db 8.8.8.8`
+(prints `CC=`, `flags=` — note `flags=0x0004` is `anycast`, which the flag
+check denies *before* the country decision).
+
 ## Runtime behavior
+
+**HTTP head:**
 
 - **`POST_READ` phase:** resolve the canonical client IP (peer, or XFF from
   a trusted proxy) and stash it for the reputation check.
-- **`PREACCESS` phase** (cheap → expensive): IP reputation → bot UA
-  heuristics → scanner path regex. The first match finalizes the request.
+- **`PREACCESS` phase** (cheap → expensive): IP reputation → UA classification
+  (`$waf_type`) → scanner path regex. Classification always sets `$waf_type`;
+  `waf_bot_block` only *acts* on `scanner`/`empty`. The first deny finalizes
+  the request. `$waf_type` is also computed lazily by the variable
+  get-handler, so it is correct even when referenced under `waf off`.
 - **Header/body filters:** the `Server:` token is overridden to
   `waf_server_token` and built-in nginx error pages are rewritten to an
   Apache-style fingerprint. These filters install in `postconfiguration`
   and run **process-wide** (they will also stamp the `auth_http` response,
   which is harmless — `ngx_mail` ignores it).
 - Subrequests and internal redirects are never re-scanned.
+
+**Mail head:** the `auth_http` content handler runs `reputation_check` on the
+`Client-IP` header that `ngx_mail` supplies — see
+[Mail (SMTP) protection](#mail-smtp-protection).
+
+**Stream head:** the stream `ACCESS` phase handler runs `reputation_check` on
+the connection peer and closes the connection on any deny — see
+[Stream (L4) protection](#stream-l4-protection).
 
 
 ## Notes & limitations
@@ -340,6 +533,10 @@ http {
 - Docker is not used in this environment; everything builds from source.
 - `waf_mail_backend` does not validate that the MTA is reachable — it only
   validates that the address is a numeric IP and the port is in range.
+- `waf_geo_whitelist` without a `waf_geo_db` denies everyone (every request
+  is "not whitelisted" → 404); a config-time warning is emitted in that case.
+- The stream (L4) head does pure IP reputation — no UA, scanner-path, or
+  spoofing logic (L4 has no headers or request line).
 
 
 ## Reference
@@ -356,3 +553,13 @@ the embedded reader came from and how it is validated:
 - **`reference/loctest.c`** — a standalone geo oracle: it resolves IPs against
   `location.db` independently of nginx, used to cross-check the module's
   country / network-flag lookups during development.
+
+The seed UA signature lists in `modules/ngx_http_waf/lists/` were distilled
+from these public catalogues (all permissively licensed); refresh against them
+periodically — AI-crawler UAs in particular drift fast:
+
+- **Matomo Device Detector** — [`bots.yml`](https://github.com/matomo-org/device-detector/blob/master/regexes/bots.yml)
+- **monperrus/crawler-user-agents** — [`crawler-user-agents.json`](https://github.com/monperrus/crawler-user-agents)
+- **ai.robots.txt** — [AI crawler list](https://github.com/ai-robots-txt/ai.robots.txt)
+- **CrawlerDetect** — [`Crawlers.php`](https://github.com/JayBizzle/Crawler-Detect)
+- libloc / IPFire location DB — [location.ipfire.org](https://location.ipfire.org/)
