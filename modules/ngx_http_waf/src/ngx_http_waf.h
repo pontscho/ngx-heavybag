@@ -15,6 +15,8 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
+#include "waf_rep.h"   /* shared ngx_waf_rep_conf_t + reputation core */
+
 
 /*
  * Block actions. Scanner patterns are grouped by action so each bucket
@@ -59,10 +61,6 @@ typedef enum {
  * list/pattern is resolved at configuration time. Workers are stateless
  * with respect to each other.
  */
-/* defined in waf_geo.h; forward-declared here to avoid an include cycle */
-struct ngx_http_waf_geo_db_s;
-
-
 typedef struct {
     ngx_flag_t                     enable;       /* waf on|off            */
     ngx_flag_t                     bot_block;    /* waf_bot_block on|off  */
@@ -75,14 +73,8 @@ typedef struct {
 
     ngx_str_t                      server_token; /* waf_server_token      */
 
-    struct ngx_http_waf_geo_db_s  *geo_db;       /* waf_geo_db            */
-    ngx_array_t                   *block_cc;     /* uint16 packed CC codes*/
-    ngx_array_t                   *allow_cc;     /* waf_geo_whitelist CCs  */
-    uint16_t                       flag_mask;    /* libloc flags to block */
-
-    ngx_array_t                   *blocklist;    /* ngx_cidr_t -> deny    */
-    ngx_array_t                   *allowlist;    /* ngx_cidr_t -> allow   */
-    ngx_array_t                   *trusted_proxy;/* ngx_cidr_t for XFF    */
+    ngx_waf_rep_conf_t             rep;          /* geo / CC / flags / CIDRs */
+    ngx_array_t                   *trusted_proxy;/* ngx_cidr_t for XFF (HTTP) */
 
     ngx_str_t                      mail_backend_addr; /* waf_mail_backend ip  */
     ngx_str_t                      mail_backend_port; /* waf_mail_backend port*/

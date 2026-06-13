@@ -62,7 +62,7 @@ ngx_http_waf_authhttp_handler(ngx_http_request_t *r)
         return ngx_http_waf_authhttp_allow(r, wlcf);
     }
 
-    rc = ngx_http_waf_reputation_check(wlcf, addr.sockaddr, &reason);
+    rc = ngx_http_waf_reputation_check(&wlcf->rep, addr.sockaddr, &reason);
 
     if (rc != NGX_DECLINED) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
