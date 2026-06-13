@@ -313,7 +313,7 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
 
     sa = (ctx->client_sa != NULL) ? ctx->client_sa : r->connection->sockaddr;
 
-    rc = ngx_http_waf_reputation_check(wlcf, sa, &reason);
+    rc = ngx_http_waf_reputation_check(&wlcf->rep, sa, &reason);
     if (rc != NGX_DECLINED) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "waf: reputation block (%V)", &reason);
@@ -402,30 +402,30 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                              NGX_HTTP_WAF_DEFAULT_TOKEN);
 
     /* reputation data: inherit when this level defined none */
-    if (conf->geo_db == NULL) {
-        conf->geo_db = prev->geo_db;
+    if (conf->rep.geo_db == NULL) {
+        conf->rep.geo_db = prev->rep.geo_db;
     }
-    if (conf->block_cc == NULL) {
-        conf->block_cc = prev->block_cc;
+    if (conf->rep.block_cc == NULL) {
+        conf->rep.block_cc = prev->rep.block_cc;
     }
-    if (conf->allow_cc == NULL) {
-        conf->allow_cc = prev->allow_cc;
+    if (conf->rep.allow_cc == NULL) {
+        conf->rep.allow_cc = prev->rep.allow_cc;
     }
-    if (conf->flag_mask == 0) {
-        conf->flag_mask = prev->flag_mask;
+    if (conf->rep.flag_mask == 0) {
+        conf->rep.flag_mask = prev->rep.flag_mask;
     }
 
     /* a country whitelist without a geo database can never allow anyone */
-    if (conf->allow_cc != NULL && conf->geo_db == NULL) {
+    if (conf->rep.allow_cc != NULL && conf->rep.geo_db == NULL) {
         ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
             "waf_geo_whitelist is set but no waf_geo_db is configured; "
             "every request will be treated as not whitelisted (404)");
     }
-    if (conf->blocklist == NULL) {
-        conf->blocklist = prev->blocklist;
+    if (conf->rep.blocklist == NULL) {
+        conf->rep.blocklist = prev->rep.blocklist;
     }
-    if (conf->allowlist == NULL) {
-        conf->allowlist = prev->allowlist;
+    if (conf->rep.allowlist == NULL) {
+        conf->rep.allowlist = prev->rep.allowlist;
     }
     if (conf->trusted_proxy == NULL) {
         conf->trusted_proxy = prev->trusted_proxy;
@@ -493,14 +493,14 @@ ngx_http_waf_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_http_waf_loc_conf_t  *wlcf = conf;
     ngx_str_t                *value;
 
-    if (wlcf->geo_db != NULL) {
+    if (wlcf->rep.geo_db != NULL) {
         return "is duplicate";
     }
 
     value = cf->args->elts;
 
-    wlcf->geo_db = ngx_http_waf_geo_open(cf, &value[1]);
-    if (wlcf->geo_db == NULL) {
+    wlcf->rep.geo_db = ngx_http_waf_geo_open(cf, &value[1]);
+    if (wlcf->rep.geo_db == NULL) {
         return NGX_CONF_ERROR;
     }
 
@@ -518,7 +518,7 @@ ngx_http_waf_set_geo_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     value = cf->args->elts;
 
     for (i = 1; i < cf->args->nelts; i++) {
-        if (ngx_http_waf_country_add(cf, &wlcf->block_cc, &value[i]) != NGX_OK) {
+        if (ngx_http_waf_country_add(cf, &wlcf->rep.block_cc, &value[i]) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
     }
@@ -543,7 +543,7 @@ ngx_http_waf_set_geo_whitelist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     value = cf->args->elts;
 
     for (i = 1; i < cf->args->nelts; i++) {
-        if (ngx_http_waf_country_add(cf, &wlcf->allow_cc, &value[i]) != NGX_OK) {
+        if (ngx_http_waf_country_add(cf, &wlcf->rep.allow_cc, &value[i]) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
     }
@@ -562,7 +562,7 @@ ngx_http_waf_set_flag_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     value = cf->args->elts;
 
     for (i = 1; i < cf->args->nelts; i++) {
-        if (ngx_http_waf_flag_add(cf, wlcf, &value[i]) != NGX_OK) {
+        if (ngx_http_waf_flag_add(cf, &wlcf->rep, &value[i]) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
     }
@@ -591,7 +591,7 @@ ngx_http_waf_set_blocklist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_http_waf_loc_conf_t  *wlcf = conf;
     ngx_str_t                *value = cf->args->elts;
 
-    if (ngx_http_waf_cidr_add(cf, &wlcf->blocklist, &value[1]) != NGX_OK) {
+    if (ngx_http_waf_cidr_add(cf, &wlcf->rep.blocklist, &value[1]) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
 
@@ -605,7 +605,7 @@ ngx_http_waf_set_allowlist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_http_waf_loc_conf_t  *wlcf = conf;
     ngx_str_t                *value = cf->args->elts;
 
-    if (ngx_http_waf_cidr_add(cf, &wlcf->allowlist, &value[1]) != NGX_OK) {
+    if (ngx_http_waf_cidr_add(cf, &wlcf->rep.allowlist, &value[1]) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
 

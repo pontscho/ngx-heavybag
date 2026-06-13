@@ -12,7 +12,7 @@
 
 
 ngx_int_t
-ngx_http_waf_reputation_check(ngx_http_waf_loc_conf_t *wlcf,
+ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
     struct sockaddr *sa, ngx_str_t *reason)
 {
     uint16_t                    cc16, *codes;
@@ -24,26 +24,26 @@ ngx_http_waf_reputation_check(ngx_http_waf_loc_conf_t *wlcf,
     }
 
     /* 1. allowlist short-circuits to allow */
-    if (wlcf->allowlist
-        && ngx_cidr_match(sa, wlcf->allowlist) == NGX_OK)
+    if (rep->allowlist
+        && ngx_cidr_match(sa, rep->allowlist) == NGX_OK)
     {
         return NGX_DECLINED;
     }
 
     /* 2. static blocklist */
-    if (wlcf->blocklist
-        && ngx_cidr_match(sa, wlcf->blocklist) == NGX_OK)
+    if (rep->blocklist
+        && ngx_cidr_match(sa, rep->blocklist) == NGX_OK)
     {
         ngx_str_set(reason, "static blocklist");
         return NGX_HTTP_FORBIDDEN;
     }
 
     /* 3. geo / network-flag reputation */
-    if (wlcf->geo_db == NULL) {
+    if (rep->geo_db == NULL) {
         return NGX_DECLINED;
     }
 
-    ngx_http_waf_geo_lookup(wlcf->geo_db, sa, &res);
+    ngx_http_waf_geo_lookup(rep->geo_db, sa, &res);
 
     if (!res.found) {
         /*
@@ -51,7 +51,7 @@ ngx_http_waf_reputation_check(ngx_http_waf_loc_conf_t *wlcf,
          * be on the allow list, so the resource is hidden (404); otherwise
          * an unknown IP is allowed through.
          */
-        if (wlcf->allow_cc) {
+        if (rep->allow_cc) {
             ngx_str_set(reason, "geo not whitelisted");
             return NGX_HTTP_NOT_FOUND;
         }
@@ -59,7 +59,7 @@ ngx_http_waf_reputation_check(ngx_http_waf_loc_conf_t *wlcf,
     }
 
     /* network-flag blocks apply first, in both block and whitelist modes */
-    if (wlcf->flag_mask && (res.flags & wlcf->flag_mask)) {
+    if (rep->flag_mask && (res.flags & rep->flag_mask)) {
         ngx_str_set(reason, "network flag");
         return NGX_HTTP_FORBIDDEN;
     }
@@ -70,10 +70,10 @@ ngx_http_waf_reputation_check(ngx_http_waf_loc_conf_t *wlcf,
      * Whitelist mode wins when set: the country must be listed or the
      * request is hidden (404). block_cc is not consulted in this mode.
      */
-    if (wlcf->allow_cc) {
-        codes = wlcf->allow_cc->elts;
+    if (rep->allow_cc) {
+        codes = rep->allow_cc->elts;
 
-        for (i = 0; i < wlcf->allow_cc->nelts; i++) {
+        for (i = 0; i < rep->allow_cc->nelts; i++) {
             if (codes[i] == cc16) {
                 return NGX_DECLINED;
             }
@@ -83,10 +83,10 @@ ngx_http_waf_reputation_check(ngx_http_waf_loc_conf_t *wlcf,
         return NGX_HTTP_NOT_FOUND;
     }
 
-    if (wlcf->block_cc) {
-        codes = wlcf->block_cc->elts;
+    if (rep->block_cc) {
+        codes = rep->block_cc->elts;
 
-        for (i = 0; i < wlcf->block_cc->nelts; i++) {
+        for (i = 0; i < rep->block_cc->nelts; i++) {
             if (codes[i] == cc16) {
                 ngx_str_set(reason, "geo country");
                 return NGX_HTTP_FORBIDDEN;
@@ -168,7 +168,7 @@ ngx_http_waf_country_add(ngx_conf_t *cf, ngx_array_t **arr, ngx_str_t *cc)
 
 
 ngx_int_t
-ngx_http_waf_flag_add(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
+ngx_http_waf_flag_add(ngx_conf_t *cf, ngx_waf_rep_conf_t *rep,
     ngx_str_t *tok)
 {
     uint16_t   flag;
@@ -206,10 +206,10 @@ ngx_http_waf_flag_add(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
         return NGX_ERROR;
     }
 
-    wlcf->flag_mask |= flag;
+    rep->flag_mask |= flag;
 
     if (cc.len) {
-        if (ngx_http_waf_country_add(cf, &wlcf->block_cc, &cc) != NGX_OK) {
+        if (ngx_http_waf_country_add(cf, &rep->block_cc, &cc) != NGX_OK) {
             return NGX_ERROR;
         }
     }
