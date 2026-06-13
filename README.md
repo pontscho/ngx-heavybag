@@ -202,6 +202,7 @@ variable, independent of `waf` / `waf_bot_block`.
 | `waf_allowlist` | `<cidr>` | — | Allow this network, short-circuiting all reputation checks. Repeatable. |
 | `waf_mail_auth` | *(none)* | — | Turn this `location` into the `ngx_mail` `auth_http` endpoint. |
 | `waf_mail_backend` | `<ip> <port>` | — | Upstream MTA returned as `Auth-Server`/`Auth-Port` on allow. **Numeric IP only** (the mail proxy cannot resolve hostnames). |
+| `waf_status` | *(none)* | — | `location`-only. Turn this `location` into the lock-free statistics endpoint (see [Statistics / status endpoint](#statistics--status-endpoint)). Wrap it in an access-restricted location. |
 
 ### Scanner list file format
 
@@ -297,6 +298,24 @@ Seed lists ship in [`modules/ngx_http_waf/lists/`](modules/ngx_http_waf/lists/),
 distilled from Matomo `bots.yml`, monperrus/crawler-user-agents,
 ai.robots.txt, and CrawlerDetect. They drift (AI crawlers especially) — a
 config reload recompiles them, so updates are a reload, not a rebuild.
+
+### Verdict variables (`$waf_country`, `$waf_reason`)
+
+Two further `NOCACHEABLE` log variables sit alongside `$waf_type`, sharing the
+same per-request verdict decision (so there is at most **one** geo lookup per
+request even when geo blocking, the per-country counter and `$waf_country` are
+all active):
+
+| Variable | Value |
+|---|---|
+| `$waf_country` | The client's ISO-3166 two-letter geo country (or an IPFire special A1/A2/A3/T1/XD). Resolves to *not found* (`-` in logs) when no geo record exists or `waf_geo_db` is unset. |
+| `$waf_reason` | The verdict token: `none` (allowed), `allowlist`, `blocklist`, `geo`, `geo_whitelist`, `flag`, `scanner_ua`, `empty_ua`, `scanner_path`. |
+
+```nginx
+log_format waf '$remote_addr $status type=$waf_type '
+               'country=$waf_country reason=$waf_reason';
+access_log /var/log/nginx/access.log waf;
+```
 
 ### Geo / reputation
 
@@ -416,6 +435,69 @@ stream {
     }
 }
 ```
+
+### Statistics / status endpoint
+
+`waf_status;` turns a `location` into a lock-free statistics endpoint, analogous
+to `stub_status`. All workers share **one** always-on shared-memory zone of
+`ngx_atomic_t` counters; the request hot path only ever does an atomic add (no
+slab, no rbtree, no mutex), and the counters are **bounded by construction**
+(a closed-set country table, a config-time per-vhost array) — never per-IP.
+
+The handler runs in the **content phase**, *after* the access phase, so an
+`allow`/`deny` on the location is enforced before any counter is rendered.
+Restrict it — the endpoint exposes operational counters only (no client IPs,
+no PII), but it should not be world-readable:
+
+```nginx
+location /waf/stat {
+    waf_status;
+    allow 127.0.0.1;
+    allow 10.0.0.0/8;     # your monitoring network
+    deny  all;
+}
+```
+
+The **last path segment** selects the format (default `plain`); only `GET` and
+`HEAD` are accepted (else `405`):
+
+| URL | Format | Content-Type |
+|---|---|---|
+| `/waf/stat/plain` (or any unknown suffix) | `stub_status`-style `key value` lines | `text/plain` |
+| `/waf/stat/json` | nested JSON object (RFC 8259) | `application/json` |
+| `/waf/stat/prometheus` | Prometheus text exposition | `text/plain` |
+
+```console
+$ curl -s http://127.0.0.1/waf/stat/prometheus | head
+waf_up 1
+waf_uptime_seconds 3812
+waf_http_requests_total 19443
+waf_http_blocked_total{reason="blocklist"} 51
+waf_http_blocked_total{reason="scanner_path"} 1208
+waf_http_blocked_total{reason="flag",flag="anycast"} 17
+waf_country_blocked_total{country="CN"} 904
+```
+
+What is tracked: global HTTP verdict counters (requests / allowed / allowlist
+hits / blocked-per-reason), the scanner-path 404/403/444 split, response-code
+counters, the `$waf_type` UA distribution, the per-flag breakdown, a bounded
+open-addressed **per-country** table (total + blocked, with a `cc_overflow`
+guard), a **per-vhost** block breakdown (labelled by `server_name`), the STREAM
+(L4) globals (`stream_connections_total` / `stream_allowed` /
+`stream_denied`-per-reason), and a geo-DB health block (network count + mapped
+size only — **never** the database path). When nginx is built with
+`--with-http_stub_status_module`, the core connection table
+(`active`/`reading`/`writing`/`accepted`/…) is re-exported too.
+
+All attacker-influenceable bytes (geo-DB country codes, `server_name` values)
+are **escaped unconditionally** at the serializer boundary — JSON per RFC 8259,
+Prometheus label values per the text-exposition rules — so a hostile geo
+database or an odd `server_name` cannot break or inject into the output.
+
+Counters live in the shm zone, so they **survive `nginx -s reload`** as long as
+the `server{}` count is unchanged (the zone size is derived from it; changing
+the count forces a fresh segment and resets the counters). A rebuilt `.so`
+still needs a full stop+start — `-s reload` does not reload module code.
 
 ### Example configuration
 

@@ -24,6 +24,19 @@
 #include "waf_rep.h"
 
 
+/*
+ * The status shm zone is owned by the HTTP head (ngx_http_waf_module sizes
+ * and inits it). The stream head resolves the SAME zone by name + tag and
+ * pokes its counters through the opaque-pointer helpers declared in
+ * waf_rep.h, so it never includes ngx_http.h / sees the layout struct. The
+ * zone is a process-wide singleton, so a file-static pointer (set at config
+ * time, inherited by workers on fork) is sufficient.
+ */
+extern ngx_module_t  ngx_http_waf_module;
+
+static ngx_shm_zone_t  *ngx_stream_waf_stat_zone;
+
+
 typedef struct {
     ngx_flag_t          enable;     /* waf_stream on|off */
     ngx_waf_rep_conf_t  rep;        /* geo / CC / flags / CIDRs */
@@ -142,8 +155,11 @@ ngx_module_t  ngx_stream_waf_module = {
 static ngx_int_t
 ngx_stream_waf_handler(ngx_stream_session_t *s)
 {
+    void                       *sh;
     ngx_int_t                   rc;
     ngx_str_t                   reason;
+    uint16_t                    cc16;
+    ngx_http_waf_verdict_t      verdict;
     ngx_stream_waf_srv_conf_t  *sscf;
 
     sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_waf_module);
@@ -153,7 +169,18 @@ ngx_stream_waf_handler(ngx_stream_session_t *s)
     }
 
     rc = ngx_http_waf_reputation_check(&sscf->rep, s->connection->sockaddr,
-                                       &reason);
+                                       &reason, &verdict);
+
+    /* resolved zone -> struct pointer (NULL until the HTTP head's init ran) */
+    sh = (ngx_stream_waf_stat_zone != NULL)
+         ? ngx_stream_waf_stat_zone->data : NULL;
+
+    ngx_http_waf_stat_stream_bump(sh, verdict.reason, rc != NGX_DECLINED);
+
+    if (verdict.geo_valid) {
+        cc16 = (uint16_t) ((verdict.country[0] << 8) | verdict.country[1]);
+        ngx_http_waf_stat_cc_bump(sh, cc16, rc != NGX_DECLINED);
+    }
 
     if (rc != NGX_DECLINED) {
         ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
@@ -234,6 +261,22 @@ ngx_stream_waf_init(ngx_conf_t *cf)
     }
 
     *h = ngx_stream_waf_handler;
+
+    /*
+     * Resolve (never create) the HTTP head's status zone: size 0 so core
+     * skips the size-conflict check and matches the existing zone by
+     * name + tag. Set NO init here - a second init would clobber the HTTP
+     * head's allocation. The handler reads zone->data once it is populated.
+     */
+    {
+        ngx_str_t  name = ngx_string("waf_status");
+
+        ngx_stream_waf_stat_zone = ngx_shared_memory_add(cf, &name, 0,
+                                                       &ngx_http_waf_module);
+        if (ngx_stream_waf_stat_zone == NULL) {
+            return NGX_ERROR;
+        }
+    }
 
     return NGX_OK;
 }

@@ -13,6 +13,7 @@
 #include "waf_geo.h"
 #include "waf_reputation.h"
 #include "waf_authhttp.h"
+#include "waf_status.h"
 
 
 #define NGX_HTTP_WAF_DEFAULT_TOKEN  "Apache/2.4.68 (Unix)"
@@ -23,13 +24,32 @@
  * categories occupy [0, WAF_UA_LIST_MAX); REGULAR and EMPTY follow. A hit is
  * returned by reference (static literal), never copied.
  */
-static ngx_str_t  waf_type_str[WAF_UA_MAX] = {
+ngx_str_t  waf_type_str[WAF_UA_MAX] = {
     ngx_string("scanner"),
     ngx_string("ai-crawler"),
     ngx_string("crawler"),
     ngx_string("bot"),
     ngx_string("regular"),
     ngx_string("empty")
+};
+
+
+/*
+ * enum -> $waf_reason string, indexed by ngx_http_waf_reason_e. The single
+ * source of truth (waf_rep.h) also indexes the per-reason counters; this
+ * table only renders the token. A hit is returned by reference (static
+ * literal), never copied. Must stay in lockstep with ngx_http_waf_reason_e.
+ */
+ngx_str_t  waf_reason_str[WAF_REASON_MAX] = {
+    ngx_string("none"),
+    ngx_string("allowlist"),
+    ngx_string("blocklist"),
+    ngx_string("geo"),
+    ngx_string("geo_whitelist"),
+    ngx_string("flag"),
+    ngx_string("scanner_ua"),
+    ngx_string("empty_ua"),
+    ngx_string("scanner_path")
 };
 
 
@@ -61,9 +81,24 @@ static char *ngx_http_waf_set_mail_auth(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_mail_backend(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_http_waf_set_status(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static ngx_int_t ngx_http_waf_preconfiguration(ngx_conf_t *cf);
 static ngx_int_t ngx_http_waf_postconfiguration(ngx_conf_t *cf);
+static void *ngx_http_waf_create_main_conf(ngx_conf_t *cf);
+static char *ngx_http_waf_init_main_conf(ngx_conf_t *cf, void *conf);
+static void *ngx_http_waf_create_srv_conf(ngx_conf_t *cf);
+static char *ngx_http_waf_merge_srv_conf(ngx_conf_t *cf, void *parent,
+    void *child);
+static ngx_int_t ngx_http_waf_stat_init_zone(ngx_shm_zone_t *shm_zone,
+    void *data);
+static ngx_int_t ngx_http_waf_stat_assign_vhosts(ngx_conf_t *cf);
+static ngx_int_t ngx_http_waf_stat_add_zone(ngx_conf_t *cf);
 static ngx_int_t ngx_http_waf_type_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_waf_country_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_waf_reason_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 
 
@@ -189,6 +224,13 @@ static ngx_command_t  ngx_http_waf_commands[] = {
       0,
       NULL },
 
+    { ngx_string("waf_status"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS,
+      ngx_http_waf_set_status,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
       ngx_null_command
 };
 
@@ -197,11 +239,11 @@ static ngx_http_module_t  ngx_http_waf_module_ctx = {
     ngx_http_waf_preconfiguration,     /* preconfiguration */
     ngx_http_waf_postconfiguration,    /* postconfiguration */
 
-    NULL,                              /* create main configuration */
-    NULL,                              /* init main configuration */
+    ngx_http_waf_create_main_conf,     /* create main configuration */
+    ngx_http_waf_init_main_conf,       /* init main configuration */
 
-    NULL,                              /* create server configuration */
-    NULL,                              /* merge server configuration */
+    ngx_http_waf_create_srv_conf,      /* create server configuration */
+    ngx_http_waf_merge_srv_conf,       /* merge server configuration */
 
     ngx_http_waf_create_loc_conf,      /* create location configuration */
     ngx_http_waf_merge_loc_conf        /* merge location configuration */
@@ -279,6 +321,135 @@ ngx_http_waf_postread_handler(ngx_http_request_t *r)
 
 
 /*
+ * Lock-free per-country counter bump (open-addressed, linear probe). cc16==0
+ * is the empty-slot sentinel (no real ISO-2 code packs to 0), claimed once
+ * with ngx_atomic_cmp_set; a lost race re-reads the winner and reuses the
+ * slot if it matches. A full table bumps cc_overflow and drops the sample
+ * rather than corrupt a slot. Shared by both heads (the STREAM head enters
+ * here through the opaque pointer, never seeing the layout struct). NULL
+ * zone is a no-op.
+ */
+void
+ngx_http_waf_stat_cc_bump(void *shm, uint16_t cc16, ngx_uint_t blocked)
+{
+    ngx_uint_t                probe, slot;
+    ngx_atomic_uint_t         cur;
+    ngx_http_waf_stat_cc_t   *cc;
+    ngx_http_waf_stat_shm_t  *sh = shm;
+
+    if (sh == NULL || cc16 == 0) {
+        return;
+    }
+
+    slot = (ngx_uint_t) cc16 % WAF_STAT_CC_SLOTS;
+
+    for (probe = 0; probe < WAF_STAT_CC_SLOTS; probe++) {
+        cc = &sh->cc[(slot + probe) % WAF_STAT_CC_SLOTS];
+
+        cur = cc->cc16;
+        if (cur == 0) {
+            if (ngx_atomic_cmp_set(&cc->cc16, 0, cc16)) {
+                cur = cc16;             /* we claimed this empty slot */
+            } else {
+                cur = cc->cc16;         /* lost the race; read the winner */
+            }
+        }
+
+        if (cur == cc16) {
+            (void) ngx_atomic_fetch_add(&cc->total, 1);
+            if (blocked) {
+                (void) ngx_atomic_fetch_add(&cc->blocked, 1);
+            }
+            return;
+        }
+        /* slot owned by another country: probe the next one */
+    }
+
+    (void) ngx_atomic_fetch_add(&sh->cc_overflow, 1);
+}
+
+
+/*
+ * Record a STREAM (L4) verdict: one connection counted, then either allowed
+ * or denied[reason]. Opaque-pointer entry for the stream head; NULL zone is
+ * a no-op.
+ */
+void
+ngx_http_waf_stat_stream_bump(void *shm, ngx_http_waf_reason_e reason,
+    ngx_uint_t denied)
+{
+    ngx_http_waf_stat_shm_t  *sh = shm;
+
+    if (sh == NULL) {
+        return;
+    }
+
+    (void) ngx_atomic_fetch_add(&sh->stream_connections_total, 1);
+
+    if (!denied) {
+        (void) ngx_atomic_fetch_add(&sh->stream_allowed, 1);
+        return;
+    }
+
+    if ((ngx_uint_t) reason < WAF_REASON_MAX) {
+        (void) ngx_atomic_fetch_add(&sh->stream_denied[reason], 1);
+    }
+}
+
+
+/* libloc flag bit -> flag_blocked[] slot (Tor has no bit; it is a CC verdict) */
+static const uint16_t  waf_flag_bits[WAF_FLAG_SLOTS] = {
+    NGX_HTTP_WAF_GEO_FLAG_ANON_PROXY,
+    NGX_HTTP_WAF_GEO_FLAG_SATELLITE,
+    NGX_HTTP_WAF_GEO_FLAG_ANYCAST,
+    NGX_HTTP_WAF_GEO_FLAG_DROP
+};
+
+
+/*
+ * Record a blocked HTTP verdict: ctx state (so $waf_reason renders even with
+ * no zone), then the global per-reason counter, the response-code counter
+ * and the per-vhost slot. sh may be NULL (zone not yet populated). status is
+ * the HTTP code being returned (403 / 404 / 444). reason is always a valid
+ * enum value, so the array indexes need no extra bound check.
+ */
+static void
+ngx_http_waf_stat_http_block(ngx_http_waf_stat_shm_t *sh, ngx_uint_t idx,
+    ngx_http_waf_ctx_t *ctx, ngx_http_waf_reason_e reason, ngx_int_t status)
+{
+    ngx_http_waf_stat_vhost_t  *v;
+
+    ctx->reason = reason;
+    ctx->verdict_set = 1;
+
+    if (sh == NULL) {
+        return;
+    }
+
+    (void) ngx_atomic_fetch_add(&sh->http_blocked[reason], 1);
+
+    switch (status) {
+    case NGX_HTTP_FORBIDDEN:
+        (void) ngx_atomic_fetch_add(&sh->http_resp_403, 1);
+        break;
+    case NGX_HTTP_NOT_FOUND:
+        (void) ngx_atomic_fetch_add(&sh->http_resp_404, 1);
+        break;
+    case NGX_HTTP_CLOSE:
+        (void) ngx_atomic_fetch_add(&sh->http_resp_444, 1);
+        break;
+    default:
+        break;
+    }
+
+    if (idx < sh->nvhosts) {
+        v = ngx_http_waf_stat_vhost(sh, idx);
+        (void) ngx_atomic_fetch_add(&v->blocked[reason], 1);
+    }
+}
+
+
+/*
  * PREACCESS phase. Order is cheap -> expensive: IP reputation
  * (blocklist/geo/flags) -> bot heuristics (string match) -> scanner regex.
  * Subrequests and internal redirects are never re-scanned.
@@ -286,11 +457,18 @@ ngx_http_waf_postread_handler(ngx_http_request_t *r)
 static ngx_int_t
 ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
 {
-    ngx_int_t                 rc;
-    ngx_str_t                 reason;
-    struct sockaddr          *sa;
-    ngx_http_waf_ctx_t       *ctx;
-    ngx_http_waf_loc_conf_t  *wlcf;
+    ngx_int_t                   rc;
+    ngx_str_t                   reason;
+    uint16_t                    cc16, matched;
+    ngx_uint_t                  idx, k;
+    struct sockaddr            *sa;
+    ngx_http_waf_ctx_t         *ctx;
+    ngx_http_waf_verdict_t      verdict;
+    ngx_http_waf_stat_shm_t    *sh;
+    ngx_http_waf_loc_conf_t    *wlcf;
+    ngx_http_waf_srv_conf_t    *wscf;
+    ngx_http_waf_main_conf_t   *wmcf;
+    ngx_http_waf_stat_vhost_t  *v;
 
     if (r != r->main) {
         return NGX_DECLINED;
@@ -311,12 +489,57 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
         ngx_http_set_ctx(r, ctx, ngx_http_waf_module);
     }
 
+    /* resolve the shared counters + this vhost's slot (slot 0 fallback) */
+    wmcf = ngx_http_get_module_main_conf(r, ngx_http_waf_module);
+    wscf = ngx_http_get_module_srv_conf(r, ngx_http_waf_module);
+    sh = (wmcf->stat_zone != NULL) ? wmcf->stat_zone->data : NULL;
+    idx = (wscf->stat_index < wmcf->nvhosts) ? wscf->stat_index : 0;
+
+    /* count this request once, before any verdict is reached */
+    if (sh != NULL) {
+        (void) ngx_atomic_fetch_add(&sh->http_requests_total, 1);
+        if (idx < sh->nvhosts) {
+            v = ngx_http_waf_stat_vhost(sh, idx);
+            (void) ngx_atomic_fetch_add(&v->requests, 1);
+        }
+    }
+
     sa = (ctx->client_sa != NULL) ? ctx->client_sa : r->connection->sockaddr;
 
-    rc = ngx_http_waf_reputation_check(&wlcf->rep, sa, &reason);
+    rc = ngx_http_waf_reputation_check(&wlcf->rep, sa, &reason, &verdict);
+
+    /*
+     * Cache the single geo lookup result so $waf_country needs no second one
+     * and the per-country counter can be bumped. cc16==0 ({0,0} country, i.e.
+     * no geo / no record) makes cc_bump a no-op.
+     */
+    if (verdict.geo_valid) {
+        ctx->country[0] = verdict.country[0];
+        ctx->country[1] = verdict.country[1];
+        ctx->geo_done = 1;
+    }
+    cc16 = (uint16_t) ((verdict.country[0] << 8) | verdict.country[1]);
+
     if (rc != NGX_DECLINED) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "waf: reputation block (%V)", &reason);
+
+        ngx_http_waf_stat_http_block(sh, idx, ctx, verdict.reason, rc);
+
+        /* per-flag breakdown only for a network-flag verdict */
+        if (sh != NULL && verdict.reason == WAF_REASON_FLAG) {
+            matched = verdict.flags & wlcf->rep.flag_mask;
+            for (k = 0; k < WAF_FLAG_SLOTS; k++) {
+                if (matched & waf_flag_bits[k]) {
+                    (void) ngx_atomic_fetch_add(&sh->flag_blocked[k], 1);
+                }
+            }
+        }
+
+        if (verdict.geo_valid) {
+            ngx_http_waf_stat_cc_bump(sh, cc16, 1);
+        }
+
         return rc;
     }
 
@@ -328,11 +551,26 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
      */
     ngx_http_waf_ua_classify(r, wlcf, ctx);
 
+    /* UA distribution over every reputation-passed (classified) request */
+    if (sh != NULL && (ngx_uint_t) ctx->ua < WAF_UA_MAX) {
+        (void) ngx_atomic_fetch_add(&sh->http_ua[ctx->ua], 1);
+    }
+
     if (wlcf->bot_block
         && (ctx->ua == WAF_UA_SCANNER || ctx->ua == WAF_UA_EMPTY))
     {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "waf: %V user-agent blocked", &waf_type_str[ctx->ua]);
+
+        ngx_http_waf_stat_http_block(sh, idx, ctx,
+            (ctx->ua == WAF_UA_SCANNER) ? WAF_REASON_SCANNER_UA
+                                        : WAF_REASON_EMPTY_UA,
+            NGX_HTTP_NOT_FOUND);
+
+        if (verdict.geo_valid) {
+            ngx_http_waf_stat_cc_bump(sh, cc16, 1);
+        }
+
         return NGX_HTTP_NOT_FOUND;
     }
 
@@ -340,7 +578,52 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
     if (rc != NGX_DECLINED) {
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "waf: scanner path \"%V\" blocked (%i)", &r->uri, rc);
+
+        ngx_http_waf_stat_http_block(sh, idx, ctx, WAF_REASON_SCANNER_PATH, rc);
+
+        if (sh != NULL) {
+            switch (rc) {
+            case NGX_HTTP_NOT_FOUND:
+                (void) ngx_atomic_fetch_add(
+                    &sh->http_scanner_path[WAF_ACTION_404], 1);
+                break;
+            case NGX_HTTP_FORBIDDEN:
+                (void) ngx_atomic_fetch_add(
+                    &sh->http_scanner_path[WAF_ACTION_403], 1);
+                break;
+            case NGX_HTTP_CLOSE:
+                (void) ngx_atomic_fetch_add(
+                    &sh->http_scanner_path[WAF_ACTION_444], 1);
+                break;
+            default:
+                break;
+            }
+        }
+
+        if (verdict.geo_valid) {
+            ngx_http_waf_stat_cc_bump(sh, cc16, 1);
+        }
+
         return rc;
+    }
+
+    /* allowed: record the (allowlist or none) reason and the allow counters */
+    ctx->reason = verdict.reason;
+    ctx->verdict_set = 1;
+
+    if (sh != NULL) {
+        (void) ngx_atomic_fetch_add(&sh->http_allowed, 1);
+        if (verdict.reason == WAF_REASON_ALLOWLIST) {
+            (void) ngx_atomic_fetch_add(&sh->http_allowlist_hits, 1);
+        }
+        if (idx < sh->nvhosts) {
+            v = ngx_http_waf_stat_vhost(sh, idx);
+            (void) ngx_atomic_fetch_add(&v->allowed, 1);
+        }
+    }
+
+    if (verdict.geo_valid) {
+        ngx_http_waf_stat_cc_bump(sh, cc16, 0);
     }
 
     return NGX_DECLINED;
@@ -437,6 +720,37 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         conf->mail_backend_port = prev->mail_backend_port;
     }
 
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * Per-server conf carries only the per-vhost status slot index. It is not
+ * set by any directive: create leaves it UNSET and the postconfiguration
+ * walk (ngx_http_waf_stat_assign_vhosts) assigns a sequential index per
+ * server{}. The hot path bounds-checks the index against nvhosts and falls
+ * back to slot 0 if it is somehow still UNSET.
+ */
+static void *
+ngx_http_waf_create_srv_conf(ngx_conf_t *cf)
+{
+    ngx_http_waf_srv_conf_t  *conf;
+
+    conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_waf_srv_conf_t));
+    if (conf == NULL) {
+        return NULL;
+    }
+
+    conf->stat_index = NGX_CONF_UNSET_UINT;
+
+    return conf;
+}
+
+
+static char *
+ngx_http_waf_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
+{
+    /* stat_index is assigned by the postconfiguration vhost walk, not merged */
     return NGX_CONF_OK;
 }
 
@@ -673,23 +987,56 @@ ngx_http_waf_set_mail_backend(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
 
 /*
- * $waf_type: the UA classification string (regular/crawler/ai-crawler/bot/
- * scanner/empty). NOCACHEABLE so the get_handler runs on demand; works even
- * where `waf off` skips the phase handlers (pure-classification use), by
- * lazily allocating ctx and classifying once.
+ * waf_status: turn this location into the lock-free statistics endpoint by
+ * installing the content handler. Operators are expected to wrap it in an
+ * access-restricted location (allow/deny); the access phase runs before this
+ * content handler, so policy is enforced before any counter is rendered.
+ */
+static char *
+ngx_http_waf_set_status(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_core_loc_conf_t  *clcf;
+
+    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+    clcf->handler = ngx_http_waf_status_handler;
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * Register the three log variables, all NOCACHEABLE so the get_handler runs
+ * on demand and works even where `waf off` skips the phase handlers (lazy
+ * ctx alloc):
+ *   $waf_type    - UA class (regular/crawler/ai-crawler/bot/scanner/empty)
+ *   $waf_country - ISO-2 geo country (lazy lookup; one per request via ctx)
+ *   $waf_reason  - verdict token from waf_reason_str[] ("none" when allowed)
  */
 static ngx_int_t
 ngx_http_waf_preconfiguration(ngx_conf_t *cf)
 {
-    ngx_str_t             name = ngx_string("waf_type");
+    ngx_str_t             type_name = ngx_string("waf_type");
+    ngx_str_t             country_name = ngx_string("waf_country");
+    ngx_str_t             reason_name = ngx_string("waf_reason");
     ngx_http_variable_t  *var;
 
-    var = ngx_http_add_variable(cf, &name, NGX_HTTP_VAR_NOCACHEABLE);
+    var = ngx_http_add_variable(cf, &type_name, NGX_HTTP_VAR_NOCACHEABLE);
     if (var == NULL) {
         return NGX_ERROR;
     }
-
     var->get_handler = ngx_http_waf_type_variable;
+
+    var = ngx_http_add_variable(cf, &country_name, NGX_HTTP_VAR_NOCACHEABLE);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+    var->get_handler = ngx_http_waf_country_variable;
+
+    var = ngx_http_add_variable(cf, &reason_name, NGX_HTTP_VAR_NOCACHEABLE);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+    var->get_handler = ngx_http_waf_reason_variable;
 
     return NGX_OK;
 }
@@ -730,6 +1077,259 @@ ngx_http_waf_type_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
 }
 
 
+/*
+ * $waf_country: the geo country (ISO-2) of the request client, or not_found
+ * when no geo record exists / geo is not configured. Reuses the ctx geo cache
+ * so at most ONE geo lookup happens per request even when the preaccess
+ * handler, geo blocking and per-country counters are all active: once
+ * geo_done is set the lookup is never repeated.
+ */
+static ngx_int_t
+ngx_http_waf_country_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    struct sockaddr            *sa;
+    ngx_http_waf_ctx_t         *ctx;
+    ngx_http_waf_loc_conf_t    *wlcf;
+    ngx_http_waf_geo_result_t   res;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_waf_module);
+    if (ctx == NULL) {
+        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_waf_ctx_t));
+        if (ctx == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_http_set_ctx(r, ctx, ngx_http_waf_module);
+    }
+
+    if (!ctx->geo_done) {
+        wlcf = ngx_http_get_module_loc_conf(r, ngx_http_waf_module);
+
+        if (wlcf->rep.geo_db != NULL) {
+            sa = (ctx->client_sa != NULL) ? ctx->client_sa
+                                          : r->connection->sockaddr;
+            ngx_http_waf_geo_lookup(wlcf->rep.geo_db, sa, &res);
+
+            if (res.found) {
+                ctx->country[0] = res.country[0];
+                ctx->country[1] = res.country[1];
+            }
+        }
+
+        ctx->geo_done = 1;
+    }
+
+    /* country[0]==0: no record (or geo disabled) -> the variable is unset */
+    if (ctx->country[0] == 0) {
+        v->valid = 0;
+        v->no_cacheable = 1;
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len = 2;
+    v->data = ctx->country;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+
+/*
+ * $waf_reason: the verdict token (none/allowlist/blocklist/geo/geo_whitelist/
+ * flag/scanner_ua/empty_ua/scanner_path). ctx->reason is zero (WAF_REASON_NONE
+ * -> "none") until the preaccess handler resolves a verdict, so an allowed or
+ * unclassified request renders "none".
+ */
+static ngx_int_t
+ngx_http_waf_reason_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_str_t           *s;
+    ngx_http_waf_ctx_t  *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_waf_module);
+    if (ctx == NULL) {
+        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_waf_ctx_t));
+        if (ctx == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_http_set_ctx(r, ctx, ngx_http_waf_module);
+    }
+
+    s = &waf_reason_str[ctx->reason];
+
+    v->len = s->len;
+    v->data = s->data;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+
+static void *
+ngx_http_waf_create_main_conf(ngx_conf_t *cf)
+{
+    ngx_http_waf_main_conf_t  *wmcf;
+
+    wmcf = ngx_pcalloc(cf->pool, sizeof(ngx_http_waf_main_conf_t));
+    if (wmcf == NULL) {
+        return NULL;
+    }
+
+    /* pcalloc: stat_zone = NULL, nvhosts = 0 (filled in postconfiguration) */
+    return wmcf;
+}
+
+
+static char *
+ngx_http_waf_init_main_conf(ngx_conf_t *cf, void *conf)
+{
+    /* the shm zone is added in postconfiguration, once nvhosts is known */
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * Status shm zone init(zone, data). Follows ngx_http_limit_req_module: the
+ * `data` argument is the PREVIOUS cycle's struct on reload (non-NULL),
+ * shm.exists marks a worker re-attach, and a fresh segment is slab-allocated
+ * and zeroed once. zone->data is keyed deliberately, NOT off zone->data==NULL
+ * (which is always NULL here): at add time it holds the main conf so this
+ * callback can size the allocation; afterwards it is swapped to the struct
+ * pointer that the HTTP head (wmcf->stat_zone->data) and the STREAM head
+ * (its resolved zone->data) both read at runtime.
+ */
+static ngx_int_t
+ngx_http_waf_stat_init_zone(ngx_shm_zone_t *shm_zone, void *data)
+{
+    size_t                     size;
+    ngx_slab_pool_t           *shpool;
+    ngx_http_waf_stat_shm_t   *sh;
+    ngx_http_waf_stat_shm_t   *osh = data;
+    ngx_http_waf_main_conf_t  *wmcf;
+
+    shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
+
+    /* reload: re-use the previous cycle's struct verbatim, stamp the reload */
+    if (osh != NULL) {
+        osh->last_reload_time = ngx_time();
+        shm_zone->data = osh;
+        return NGX_OK;
+    }
+
+    /* worker re-attach to an existing segment */
+    if (shm_zone->shm.exists) {
+        shm_zone->data = shpool->data;
+        return NGX_OK;
+    }
+
+    /* fresh segment: shm_zone->data still holds the main conf (set at add) */
+    wmcf = shm_zone->data;
+
+    size = sizeof(ngx_http_waf_stat_shm_t)
+           + wmcf->nvhosts * sizeof(ngx_http_waf_stat_vhost_t);
+
+    sh = ngx_slab_alloc(shpool, size);
+    if (sh == NULL) {
+        ngx_log_error(NGX_LOG_EMERG, shm_zone->shm.log, 0,
+                      "waf: cannot allocate status zone");
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(sh, size);
+    sh->start_time = ngx_time();
+    sh->last_reload_time = sh->start_time;
+    sh->nvhosts = wmcf->nvhosts;
+
+    shpool->data = sh;
+    shm_zone->data = sh;
+
+    return NGX_OK;
+}
+
+
+/*
+ * Add the always-on "waf_status" shm zone, sized from the fixed counter
+ * struct plus the per-vhost array (nvhosts, set by the vhost walk just
+ * before this). The multiply-then-add is integer-overflow guarded. The
+ * STREAM head re-resolves the same name+tag with size 0 (no init). A few
+ * extra pages cover the ngx_slab_pool_t header + page bookkeeping that core
+ * overlays on every shm zone.
+ */
+static ngx_int_t
+ngx_http_waf_stat_add_zone(ngx_conf_t *cf)
+{
+    size_t                     size;
+    ngx_str_t                  name = ngx_string("waf_status");
+    ngx_shm_zone_t            *zone;
+    ngx_http_waf_main_conf_t  *wmcf;
+
+    wmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_waf_module);
+
+    if (wmcf->nvhosts
+        > (NGX_MAX_SIZE_T_VALUE - sizeof(ngx_http_waf_stat_shm_t))
+          / sizeof(ngx_http_waf_stat_vhost_t))
+    {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "waf: too many server blocks for the status zone");
+        return NGX_ERROR;
+    }
+
+    size = sizeof(ngx_http_waf_stat_shm_t)
+           + wmcf->nvhosts * sizeof(ngx_http_waf_stat_vhost_t);
+
+    size = ngx_align(size + 4 * ngx_pagesize, ngx_pagesize);
+
+    zone = ngx_shared_memory_add(cf, &name, size, &ngx_http_waf_module);
+    if (zone == NULL) {
+        return NGX_ERROR;
+    }
+
+    zone->init = ngx_http_waf_stat_init_zone;
+    zone->data = wmcf;   /* init reads nvhosts, then swaps in the struct ptr */
+
+    wmcf->stat_zone = zone;
+
+    return NGX_OK;
+}
+
+
+/*
+ * Walk every configured server{} and assign it a sequential per-vhost stat
+ * slot (0..nvhosts-1), storing the final count in the main conf. MUST run
+ * before ngx_http_waf_stat_add_zone, because nvhosts sizes the zone. The WAF
+ * srv conf is reached through the core server conf's module context.
+ */
+static ngx_int_t
+ngx_http_waf_stat_assign_vhosts(ngx_conf_t *cf)
+{
+    ngx_uint_t                   i;
+    ngx_http_core_srv_conf_t   **cscfp;
+    ngx_http_core_main_conf_t   *cmcf;
+    ngx_http_waf_srv_conf_t     *wscf;
+    ngx_http_waf_main_conf_t    *wmcf;
+
+    cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
+    wmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_waf_module);
+
+    cscfp = cmcf->servers.elts;
+
+    for (i = 0; i < cmcf->servers.nelts; i++) {
+        wscf = cscfp[i]->ctx->srv_conf[ngx_http_waf_module.ctx_index];
+        wscf->stat_index = i;
+    }
+
+    wmcf->nvhosts = cmcf->servers.nelts;
+
+    return NGX_OK;
+}
+
+
 static ngx_int_t
 ngx_http_waf_postconfiguration(ngx_conf_t *cf)
 {
@@ -754,6 +1354,16 @@ ngx_http_waf_postconfiguration(ngx_conf_t *cf)
 
     /* Apache header + error-page spoofing filters */
     if (ngx_http_waf_spoof_init(cf) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    /* assign each server{} a per-vhost counter slot (this sizes the zone) */
+    if (ngx_http_waf_stat_assign_vhosts(cf) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    /* add the always-on lock-free status zone, now that nvhosts is known */
+    if (ngx_http_waf_stat_add_zone(cf) != NGX_OK) {
         return NGX_ERROR;
     }
 

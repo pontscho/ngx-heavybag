@@ -13,11 +13,26 @@
 
 ngx_int_t
 ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
-    struct sockaddr *sa, ngx_str_t *reason)
+    struct sockaddr *sa, ngx_str_t *reason, ngx_http_waf_verdict_t *out)
 {
     uint16_t                    cc16, *codes;
     ngx_uint_t                  i;
     ngx_http_waf_geo_result_t   res;
+
+    /*
+     * Fully define the write-only verdict up front so callers never read an
+     * uninitialised field: reason defaults to NONE, no geo lookup ran, no
+     * country. Each return below only overrides reason; the geo branch fills
+     * country/flags/geo_valid. Every write stays NULL-guarded (SMTP passes
+     * NULL). The control flow / verdict is byte-identical to before.
+     */
+    if (out != NULL) {
+        out->reason = WAF_REASON_NONE;
+        out->country[0] = 0;
+        out->country[1] = 0;
+        out->flags = 0;
+        out->geo_valid = 0;
+    }
 
     if (sa == NULL) {
         return NGX_DECLINED;
@@ -27,6 +42,9 @@ ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
     if (rep->allowlist
         && ngx_cidr_match(sa, rep->allowlist) == NGX_OK)
     {
+        if (out != NULL) {
+            out->reason = WAF_REASON_ALLOWLIST;
+        }
         return NGX_DECLINED;
     }
 
@@ -35,6 +53,9 @@ ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
         && ngx_cidr_match(sa, rep->blocklist) == NGX_OK)
     {
         ngx_str_set(reason, "static blocklist");
+        if (out != NULL) {
+            out->reason = WAF_REASON_BLOCKLIST;
+        }
         return NGX_HTTP_FORBIDDEN;
     }
 
@@ -45,6 +66,21 @@ ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
 
     ngx_http_waf_geo_lookup(rep->geo_db, sa, &res);
 
+    /*
+     * A geo lookup ran: publish the primitive geo fields to the caller's
+     * verdict (write-only, never consulted for the decision below). On a
+     * miss res.country/flags are undefined, so only copy them when found;
+     * geo_valid still records that the lookup happened.
+     */
+    if (out != NULL) {
+        out->geo_valid = 1;
+        if (res.found) {
+            out->country[0] = res.country[0];
+            out->country[1] = res.country[1];
+            out->flags = res.flags;
+        }
+    }
+
     if (!res.found) {
         /*
          * No geo record. In whitelist mode the country cannot be proven to
@@ -53,6 +89,9 @@ ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
          */
         if (rep->allow_cc) {
             ngx_str_set(reason, "geo not whitelisted");
+            if (out != NULL) {
+                out->reason = WAF_REASON_GEO_WHITELIST;
+            }
             return NGX_HTTP_NOT_FOUND;
         }
         return NGX_DECLINED;
@@ -61,6 +100,9 @@ ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
     /* network-flag blocks apply first, in both block and whitelist modes */
     if (rep->flag_mask && (res.flags & rep->flag_mask)) {
         ngx_str_set(reason, "network flag");
+        if (out != NULL) {
+            out->reason = WAF_REASON_FLAG;
+        }
         return NGX_HTTP_FORBIDDEN;
     }
 
@@ -80,6 +122,9 @@ ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
         }
 
         ngx_str_set(reason, "geo not whitelisted");
+        if (out != NULL) {
+            out->reason = WAF_REASON_GEO_WHITELIST;
+        }
         return NGX_HTTP_NOT_FOUND;
     }
 
@@ -89,6 +134,9 @@ ngx_http_waf_reputation_check(ngx_waf_rep_conf_t *rep,
         for (i = 0; i < rep->block_cc->nelts; i++) {
             if (codes[i] == cc16) {
                 ngx_str_set(reason, "geo country");
+                if (out != NULL) {
+                    out->reason = WAF_REASON_GEO;
+                }
                 return NGX_HTTP_FORBIDDEN;
             }
         }
