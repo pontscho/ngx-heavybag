@@ -47,6 +47,8 @@ static char *ngx_http_waf_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_geo_block(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_http_waf_set_geo_whitelist(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static char *ngx_http_waf_set_flag_block(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_trusted_proxy(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -134,6 +136,13 @@ static ngx_command_t  ngx_http_waf_commands[] = {
     { ngx_string("waf_geo_block"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
       ngx_http_waf_set_geo_block,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("waf_geo_whitelist"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      ngx_http_waf_set_geo_whitelist,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
@@ -399,8 +408,18 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     if (conf->block_cc == NULL) {
         conf->block_cc = prev->block_cc;
     }
+    if (conf->allow_cc == NULL) {
+        conf->allow_cc = prev->allow_cc;
+    }
     if (conf->flag_mask == 0) {
         conf->flag_mask = prev->flag_mask;
+    }
+
+    /* a country whitelist without a geo database can never allow anyone */
+    if (conf->allow_cc != NULL && conf->geo_db == NULL) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+            "waf_geo_whitelist is set but no waf_geo_db is configured; "
+            "every request will be treated as not whitelisted (404)");
     }
     if (conf->blocklist == NULL) {
         conf->blocklist = prev->blocklist;
@@ -500,6 +519,31 @@ ngx_http_waf_set_geo_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     for (i = 1; i < cf->args->nelts; i++) {
         if (ngx_http_waf_country_add(cf, &wlcf->block_cc, &value[i]) != NGX_OK) {
+            return NGX_CONF_ERROR;
+        }
+    }
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * waf_geo_whitelist <CC>...: allow only the listed countries; every other
+ * country -- and any IP with no geo record -- is hidden (404). Coexists with
+ * waf_geo_block but wins over it: when a whitelist is set on a location the
+ * block list is not consulted for the country decision.
+ */
+static char *
+ngx_http_waf_set_geo_whitelist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_waf_loc_conf_t  *wlcf = conf;
+    ngx_str_t                *value;
+    ngx_uint_t                i;
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+        if (ngx_http_waf_country_add(cf, &wlcf->allow_cc, &value[i]) != NGX_OK) {
             return NGX_CONF_ERROR;
         }
     }
