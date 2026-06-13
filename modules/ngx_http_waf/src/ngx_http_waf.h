@@ -77,6 +77,7 @@ typedef struct {
 
     struct ngx_http_waf_geo_db_s  *geo_db;       /* waf_geo_db            */
     ngx_array_t                   *block_cc;     /* uint16 packed CC codes*/
+    ngx_array_t                   *allow_cc;     /* waf_geo_whitelist CCs  */
     uint16_t                       flag_mask;    /* libloc flags to block */
 
     ngx_array_t                   *blocklist;    /* ngx_cidr_t -> deny    */

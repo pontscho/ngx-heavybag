@@ -46,16 +46,44 @@ ngx_http_waf_reputation_check(ngx_http_waf_loc_conf_t *wlcf,
     ngx_http_waf_geo_lookup(wlcf->geo_db, sa, &res);
 
     if (!res.found) {
+        /*
+         * No geo record. In whitelist mode the country cannot be proven to
+         * be on the allow list, so the resource is hidden (404); otherwise
+         * an unknown IP is allowed through.
+         */
+        if (wlcf->allow_cc) {
+            ngx_str_set(reason, "geo not whitelisted");
+            return NGX_HTTP_NOT_FOUND;
+        }
         return NGX_DECLINED;
     }
 
+    /* network-flag blocks apply first, in both block and whitelist modes */
     if (wlcf->flag_mask && (res.flags & wlcf->flag_mask)) {
         ngx_str_set(reason, "network flag");
         return NGX_HTTP_FORBIDDEN;
     }
 
+    cc16 = (uint16_t) ((res.country[0] << 8) | res.country[1]);
+
+    /*
+     * Whitelist mode wins when set: the country must be listed or the
+     * request is hidden (404). block_cc is not consulted in this mode.
+     */
+    if (wlcf->allow_cc) {
+        codes = wlcf->allow_cc->elts;
+
+        for (i = 0; i < wlcf->allow_cc->nelts; i++) {
+            if (codes[i] == cc16) {
+                return NGX_DECLINED;
+            }
+        }
+
+        ngx_str_set(reason, "geo not whitelisted");
+        return NGX_HTTP_NOT_FOUND;
+    }
+
     if (wlcf->block_cc) {
-        cc16 = (uint16_t) ((res.country[0] << 8) | res.country[1]);
         codes = wlcf->block_cc->elts;
 
         for (i = 0; i < wlcf->block_cc->nelts; i++) {

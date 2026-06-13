@@ -7,6 +7,10 @@
  *
  *     allowlist (allow) -> blocklist (deny) -> geo country / network flag.
  *
+ * Geo can run in two modes: a country block list (deny listed -> 403), or a
+ * country whitelist (allow only listed; everyone else, including IPs with no
+ * geo record, -> 404). The whitelist wins when both are set.
+ *
  * The config-time helpers parse the directive arguments (CIDRs, ISO
  * country codes, libloc flag names) into the loc conf.
  */
@@ -19,9 +23,10 @@
 
 
 /*
- * Verdict for *sa. Returns NGX_DECLINED to allow, NGX_HTTP_FORBIDDEN to
- * deny; on deny *reason is set to a static description for logging /
- * Auth-Status.
+ * Verdict for *sa. Returns NGX_DECLINED to allow, or a forbidden status to
+ * deny: NGX_HTTP_FORBIDDEN (403) for blocklist / network-flag / geo-block,
+ * NGX_HTTP_NOT_FOUND (404) for a geo-whitelist miss. On deny *reason is set
+ * to a static description for logging / Auth-Status.
  */
 ngx_int_t ngx_http_waf_reputation_check(ngx_http_waf_loc_conf_t *wlcf,
     struct sockaddr *sa, ngx_str_t *reason);
