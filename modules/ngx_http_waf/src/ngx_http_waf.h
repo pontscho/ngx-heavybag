@@ -96,6 +96,11 @@ typedef struct {
     socklen_t         client_socklen;
 
     ngx_http_waf_ua_e ua;             /* $waf_type outcome (valid iff classified) */
+
+    unsigned              geo_done:1;    /* country[] resolved (lazy guard)        */
+    unsigned              verdict_set:1; /* reason resolved by preaccess handler    */
+    u_char                country[2];    /* ISO-2 verbatim; {0,0}=unknown          */
+    ngx_http_waf_reason_e reason;         /* $waf_reason outcome (valid iff verdict_set) */
 } ngx_http_waf_ctx_t;
 
 
