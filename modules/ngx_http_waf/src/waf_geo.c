@@ -130,13 +130,15 @@ ngx_http_waf_geo_open(ngx_conf_t *cf, ngx_str_t *path)
     /* Descend the v6 trie to the IPv4-mapped root (::ffff:0:0/96). */
     nxt = 0;
     for (i = 0; i < 96; i++) {
-        if ((size_t) nxt * 12 >= db->block_len[NGX_HTTP_WAF_GEO_NT]) {
+        size_t  off = (size_t) nxt * 12;
+
+        if (off + 12 > db->block_len[NGX_HTTP_WAF_GEO_NT]) {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                 "geo database \"%V\" truncated network tree", &full);
             return NULL;
         }
         nxt = ngx_http_waf_geo_u32(db->block[NGX_HTTP_WAF_GEO_NT]
-                                   + 12 * nxt + (i < 80 ? 0 : 4));
+                                   + off + (i < 80 ? 0 : 4));
     }
     db->ipv4root = nxt;
 
@@ -169,14 +171,20 @@ ngx_http_waf_geo_walk(ngx_http_waf_geo_db_t *db, const u_char *addr,
     ngx_int_t   ret = -1;
     ngx_uint_t  mask = 0;
     ngx_uint_t  bit;
+    size_t      off;
 
     do {
-        nxt *= 12;
-        if (nxt >= ntlen) {
+        /*
+         * Offset in size_t so the index cannot wrap (nxt is an untrusted
+         * 32-bit value from the DB), and require the whole 12-byte node to
+         * fit -- guarding only its first byte over-reads a trailing node.
+         */
+        off = (size_t) nxt * 12;
+        if (off + 12 > ntlen) {
             return -1;
         }
 
-        net = ngx_http_waf_geo_u32(nt + nxt + 8);
+        net = ngx_http_waf_geo_u32(nt + off + 8);
         if (!(net & 0x80000000)) {
             ret = (ngx_int_t) net;
         }
@@ -187,7 +195,7 @@ ngx_http_waf_geo_walk(ngx_http_waf_geo_db_t *db, const u_char *addr,
 
         bit = (addr[mask >> 3] >> (7 - (mask & 7))) & 1;
         mask++;
-        nxt = ngx_http_waf_geo_u32(nt + nxt + bit * 4);
+        nxt = ngx_http_waf_geo_u32(nt + off + bit * 4);
 
     } while (nxt);
 
@@ -234,7 +242,7 @@ ngx_http_waf_geo_lookup(ngx_http_waf_geo_db_t *db, struct sockaddr *sa,
     }
 
     if (net < 0
-        || (uint32_t) net * 12 + 12 > db->block_len[NGX_HTTP_WAF_GEO_ND])
+        || (size_t) net * 12 + 12 > db->block_len[NGX_HTTP_WAF_GEO_ND])
     {
         return;
     }
@@ -247,7 +255,7 @@ ngx_http_waf_geo_lookup(ngx_http_waf_geo_db_t *db, struct sockaddr *sa,
      * nanolibloc reads cc and asn but skips flags; the flags are at
      * offset 8, NOT right after the country code.
      */
-    p = db->block[NGX_HTTP_WAF_GEO_ND] + (uint32_t) net * 12;
+    p = db->block[NGX_HTTP_WAF_GEO_ND] + (size_t) net * 12;
 
     res->country[0] = p[0];
     res->country[1] = p[1];

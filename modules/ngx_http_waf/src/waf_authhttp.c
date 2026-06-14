@@ -16,6 +16,7 @@
 static ngx_table_elt_t *ngx_http_waf_add_header(ngx_http_request_t *r,
     const char *key, size_t klen, u_char *val, size_t vlen);
 static ngx_str_t *ngx_http_waf_client_ip(ngx_http_request_t *r);
+static ngx_uint_t ngx_http_waf_authhttp_peer_trusted(ngx_connection_t *c);
 static ngx_int_t ngx_http_waf_authhttp_finalize(ngx_http_request_t *r);
 static ngx_int_t ngx_http_waf_authhttp_allow(ngx_http_request_t *r,
     ngx_http_waf_loc_conf_t *wlcf);
@@ -34,8 +35,9 @@ ngx_http_waf_authhttp_handler(ngx_http_request_t *r)
 {
     ngx_int_t                 rc;
     ngx_str_t                 reason;
-    ngx_str_t                *client_ip;
+    ngx_str_t                *client_ip = NULL;
     ngx_addr_t                addr;
+    struct sockaddr          *sa;
     ngx_http_waf_loc_conf_t  *wlcf;
 
     /* auth_http issues GET; discard any body and ignore the method. */
@@ -46,32 +48,96 @@ ngx_http_waf_authhttp_handler(ngx_http_request_t *r)
 
     wlcf = ngx_http_get_module_loc_conf(r, ngx_http_waf_module);
 
-    client_ip = ngx_http_waf_client_ip(r);
+    /*
+     * The mail proxy reaches this endpoint over loopback and puts the real
+     * peer in Client-IP. Only honour that header when the request actually
+     * came from a trusted (loopback / unix) peer; otherwise the endpoint has
+     * been exposed and Client-IP is attacker-spoofable, so judge the real
+     * connection peer instead. (The location should also carry "waf off".)
+     */
+    if (ngx_http_waf_authhttp_peer_trusted(r->connection)) {
 
-    if (client_ip == NULL
-        || ngx_parse_addr(r->pool, &addr, client_ip->data, client_ip->len)
-           != NGX_OK)
-    {
-        /*
-         * ngx_mail always sets Client-IP from the real peer, so a missing
-         * or unparseable value means a malformed or external request.
-         * Fail open (allow) rather than break mail delivery, but log it.
-         */
+        client_ip = ngx_http_waf_client_ip(r);
+
+        if (client_ip == NULL
+            || ngx_parse_addr(r->pool, &addr, client_ip->data, client_ip->len)
+               != NGX_OK)
+        {
+            /*
+             * ngx_mail always sets Client-IP from the real peer, so a missing
+             * or unparseable value means a malformed or external request.
+             * Fail open (allow) rather than break mail delivery, but log it.
+             */
+            ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                          "waf: mail auth without parseable Client-IP, allowing");
+            return ngx_http_waf_authhttp_allow(r, wlcf);
+        }
+
+        sa = addr.sockaddr;
+
+    } else {
         ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
-                      "waf: mail auth without parseable Client-IP, allowing");
-        return ngx_http_waf_authhttp_allow(r, wlcf);
+                      "waf: mail auth from untrusted peer, ignoring Client-IP "
+                      "and judging the connection peer");
+        sa = r->connection->sockaddr;
     }
 
     /* SMTP-auth wants no geo side data: pass NULL (the out NULL-guard path). */
-    rc = ngx_http_waf_reputation_check(&wlcf->rep, addr.sockaddr, &reason, NULL);
+    rc = ngx_http_waf_reputation_check(&wlcf->rep, sa, &reason, NULL);
 
     if (rc != NGX_DECLINED) {
-        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                      "waf: mail reputation block %V (%V)", client_ip, &reason);
+        if (client_ip != NULL) {
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                          "waf: mail reputation block %V (%V)",
+                          client_ip, &reason);
+        } else {
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                          "waf: mail reputation block peer (%V)", &reason);
+        }
         return ngx_http_waf_authhttp_deny(r, &reason);
     }
 
     return ngx_http_waf_authhttp_allow(r, wlcf);
+}
+
+
+/*
+ * Is the request peer trusted to dictate Client-IP? In this edge-firewall
+ * topology the mail proxy reaches auth_http over loopback (or a unix socket),
+ * so only those peers may set the address we judge.
+ */
+static ngx_uint_t
+ngx_http_waf_authhttp_peer_trusted(ngx_connection_t *c)
+{
+    struct sockaddr_in   *sin;
+#if (NGX_HAVE_INET6)
+    struct sockaddr_in6  *sin6;
+#endif
+
+    if (c->sockaddr == NULL) {
+        return 0;
+    }
+
+    switch (c->sockaddr->sa_family) {
+
+#if (NGX_HAVE_UNIX_DOMAIN)
+    case AF_UNIX:
+        return 1;
+#endif
+
+    case AF_INET:
+        sin = (struct sockaddr_in *) c->sockaddr;
+        /* 127.0.0.0/8, byte-order independent */
+        return ((u_char *) &sin->sin_addr.s_addr)[0] == 127;
+
+#if (NGX_HAVE_INET6)
+    case AF_INET6:
+        sin6 = (struct sockaddr_in6 *) c->sockaddr;
+        return IN6_IS_ADDR_LOOPBACK(&sin6->sin6_addr) ? 1 : 0;
+#endif
+    }
+
+    return 0;
 }
 
 
