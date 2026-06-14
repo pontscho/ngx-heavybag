@@ -54,6 +54,21 @@ typedef enum {
 
 
 /*
+ * Request-field signature subjects beyond the URI path. Each value indexes
+ * one config-file-driven, action-bucketed regex row in loc_conf.sig_re[][]
+ * (same machinery as the scanner path list). The matched value is %-decoded
+ * before the regex runs, so the patterns see the same bytes the scanner sees
+ * on the already-decoded r->uri.
+ */
+typedef enum {
+    WAF_SIG_ARGS = 0,          /* r->args (query string)            */
+    WAF_SIG_COOKIE,            /* Cookie request header(s)          */
+    WAF_SIG_REFERER,           /* Referer request header            */
+    WAF_SIG_LIST_MAX           /* == 3: number of sig_re[] rows     */
+} ngx_http_waf_sig_e;
+
+
+/*
  * Per-{http,server,location} configuration.
  *
  * The module carries no shared writable state: the geo database is
@@ -70,6 +85,10 @@ typedef struct {
 
     /* UA classification: one compiled alternation per list-backed category */
     ngx_regex_t                   *ua_re[WAF_UA_LIST_MAX];
+
+    /* args/cookie/referer signatures: one action-bucketed row per subject */
+    ngx_str_t        sig_list[WAF_SIG_LIST_MAX];   /* dup-guard / merge sentinel */
+    ngx_regex_t     *sig_re[WAF_SIG_LIST_MAX][WAF_ACTION_MAX];
 
     ngx_str_t                      server_token; /* waf_server_token      */
 
