@@ -27,10 +27,17 @@ static ngx_uint_t  waf_action_code[WAF_ACTION_MAX] = {
 
 static ngx_int_t ngx_http_waf_read_file(ngx_conf_t *cf, ngx_str_t *path,
     ngx_str_t *out);
+static ngx_int_t ngx_http_waf_next_line(u_char **pp, u_char *end,
+    u_char **ls_out, u_char **le_out);
 static ngx_int_t ngx_http_waf_compile_bucket(ngx_conf_t *cf,
     ngx_array_t *patterns, ngx_regex_t **out);
 
 
+/*
+ * Config-time: resolve path against the prefix, open and stat it, and read
+ * the whole file into a temp-pool buffer returned via out. Logs and returns
+ * NGX_ERROR on any open/stat/short-read failure.
+ */
 static ngx_int_t
 ngx_http_waf_read_file(ngx_conf_t *cf, ngx_str_t *path, ngx_str_t *out)
 {
@@ -86,6 +93,62 @@ ngx_http_waf_read_file(ngx_conf_t *cf, ngx_str_t *path, ngx_str_t *out)
 }
 
 
+/*
+ * Yield the next significant line from the buffer [*pp, end): a trailing CR
+ * and surrounding spaces/tabs are stripped, blank and '#'-comment lines are
+ * skipped. On success advances *pp past the line, sets *ls_out and *le_out to the
+ * trimmed bounds and returns NGX_OK; returns NGX_DONE at end of buffer.
+ */
+static ngx_int_t
+ngx_http_waf_next_line(u_char **pp, u_char *end, u_char **ls_out,
+    u_char **le_out)
+{
+    u_char  *p, *ls, *le;
+
+    p = *pp;
+
+    while (p < end) {
+
+        ls = p;
+        while (p < end && *p != '\n') {
+            p++;
+        }
+        le = p;
+        if (p < end) {
+            p++;                       /* step over '\n' for next round */
+        }
+
+        if (le > ls && le[-1] == '\r') {
+            le--;
+        }
+
+        while (ls < le && (*ls == ' ' || *ls == '\t')) {
+            ls++;
+        }
+        while (le > ls && (le[-1] == ' ' || le[-1] == '\t')) {
+            le--;
+        }
+
+        if (ls == le || *ls == '#') {
+            continue;
+        }
+
+        *pp = p;
+        *ls_out = ls;
+        *le_out = le;
+        return NGX_OK;
+    }
+
+    *pp = p;
+    return NGX_DONE;
+}
+
+
+/*
+ * Join the patterns into one caseless alternation -- each item wrapped as a
+ * non-capturing group and separated by '|' -- then compile it to a single
+ * regex returned via out. An empty list yields a NULL regex and NGX_OK.
+ */
 static ngx_int_t
 ngx_http_waf_compile_bucket(ngx_conf_t *cf, ngx_array_t *patterns,
     ngx_regex_t **out)
@@ -169,31 +232,7 @@ ngx_http_waf_scanner_compile(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
     p = content.data;
     end = p + content.len;
 
-    while (p < end) {
-
-        ls = p;
-        while (p < end && *p != '\n') {
-            p++;
-        }
-        le = p;
-        if (p < end) {
-            p++;                       /* step over '\n' for next round */
-        }
-
-        if (le > ls && le[-1] == '\r') {
-            le--;
-        }
-
-        while (ls < le && (*ls == ' ' || *ls == '\t')) {
-            ls++;
-        }
-        while (le > ls && (le[-1] == ' ' || le[-1] == '\t')) {
-            le--;
-        }
-
-        if (ls == le || *ls == '#') {
-            continue;
-        }
+    while (ngx_http_waf_next_line(&p, end, &ls, &le) == NGX_OK) {
 
         /* pattern = up to first whitespace; optional action token follows */
         ps = ls;
@@ -302,31 +341,7 @@ ngx_http_waf_ua_list_compile(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
     p = content.data;
     end = p + content.len;
 
-    while (p < end) {
-
-        ls = p;
-        while (p < end && *p != '\n') {
-            p++;
-        }
-        le = p;
-        if (p < end) {
-            p++;                       /* step over '\n' for next round */
-        }
-
-        if (le > ls && le[-1] == '\r') {
-            le--;
-        }
-
-        while (ls < le && (*ls == ' ' || *ls == '\t')) {
-            ls++;
-        }
-        while (le > ls && (le[-1] == ' ' || le[-1] == '\t')) {
-            le--;
-        }
-
-        if (ls == le || *ls == '#') {
-            continue;
-        }
+    while (ngx_http_waf_next_line(&p, end, &ls, &le) == NGX_OK) {
 
         /* the whole trimmed line is one PCRE2 fragment -- no action token */
         tok = ngx_array_push(tokens);

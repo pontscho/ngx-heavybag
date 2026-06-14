@@ -241,6 +241,12 @@ ngx_stream_waf_create_srv_conf(ngx_conf_t *cf)
 }
 
 
+/*
+ * STREAM merge step: inherit the mode (fail-closed default) and every
+ * reputation field unset at this server level -- geo db, block_cc,
+ * block_asn, allow_cc, flag_mask, blocklist and allowlist. Warns when a
+ * country whitelist is configured without a geo database.
+ */
 static char *
 ngx_stream_waf_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
 {
@@ -283,6 +289,11 @@ ngx_stream_waf_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
 }
 
 
+/*
+ * STREAM postconfiguration: register the ACCESS-phase connection handler and
+ * resolve (never create) the HTTP module's shared waf_status zone by name so
+ * the stream handler can update the same counters the HTTP side owns.
+ */
 static ngx_int_t
 ngx_stream_waf_init(ngx_conf_t *cf)
 {
@@ -318,6 +329,10 @@ ngx_stream_waf_init(ngx_conf_t *cf)
 }
 
 
+/*
+ * waf_geo_db <path>: open and attach the geo database for this stream
+ * server. Rejects a duplicate directive; geo_open does the open/validation.
+ */
 static char *
 ngx_stream_waf_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -339,6 +354,10 @@ ngx_stream_waf_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_geo_block <CC>...: deny connections from the listed countries. Each
+ * ISO-2 country-code argument is appended to rep.block_cc.
+ */
 static char *
 ngx_stream_waf_set_geo_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -358,6 +377,11 @@ ngx_stream_waf_set_geo_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_asn_block <ASN>...: deny connections whose source IP resolves to one
+ * of the listed autonomous systems. Each argument is appended to
+ * rep.block_asn.
+ */
 static char *
 ngx_stream_waf_set_asn_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -377,6 +401,10 @@ ngx_stream_waf_set_asn_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_geo_whitelist <CC>...: allow only connections from the listed
+ * countries. Each ISO-2 country-code argument is appended to rep.allow_cc.
+ */
 static char *
 ngx_stream_waf_set_geo_whitelist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -396,6 +424,11 @@ ngx_stream_waf_set_geo_whitelist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_flag_block <flag>...: deny connections whose geo record carries one
+ * of the named flags. Each argument is parsed via flag_add into the
+ * reputation flag_mask and flag_cc state.
+ */
 static char *
 ngx_stream_waf_set_flag_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -413,6 +446,10 @@ ngx_stream_waf_set_flag_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_blocklist <CIDR>: append a network to the reputation blocklist whose
+ * connections are always denied.
+ */
 static char *
 ngx_stream_waf_set_blocklist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -427,6 +464,10 @@ ngx_stream_waf_set_blocklist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_allowlist <CIDR>: append a network to the reputation allowlist whose
+ * connections bypass the reputation checks.
+ */
 static char *
 ngx_stream_waf_set_allowlist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {

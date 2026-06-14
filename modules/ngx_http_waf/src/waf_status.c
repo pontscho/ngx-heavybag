@@ -170,6 +170,11 @@ ngx_http_waf_status_bufsize(ngx_uint_t nvhosts,
 
 /* --- plain (stub_status-style) ------------------------------------------- */
 
+/*
+ * Render the counter snapshot as a stub_status-style plain-text dump into
+ * the buffer [p, last): global totals followed by one line group per vhost
+ * and per-country/flag breakdown. Returns the advanced write pointer.
+ */
 static u_char *
 ngx_http_waf_status_plain(u_char *p, u_char *last,
     ngx_http_waf_stat_shm_t *snap, ngx_http_waf_stat_shm_t *sh,
@@ -328,6 +333,11 @@ ngx_http_waf_status_plain(u_char *p, u_char *last,
 
 /* --- json (RFC 8259) ----------------------------------------------------- */
 
+/*
+ * Render the counter snapshot as an RFC 8259 JSON object into the buffer
+ * [p, last): global totals plus a per-vhost array with country and flag
+ * sub-objects. Returns the advanced write pointer.
+ */
 static u_char *
 ngx_http_waf_status_json(u_char *p, u_char *last,
     ngx_http_waf_stat_shm_t *snap, ngx_http_waf_stat_shm_t *sh,
@@ -472,6 +482,11 @@ ngx_http_waf_status_json(u_char *p, u_char *last,
 
 /* --- prometheus (text exposition) ---------------------------------------- */
 
+/*
+ * Render the counter snapshot in the Prometheus text-exposition format into
+ * the buffer [p, last): HELP/TYPE headers and metric lines labelled by
+ * vhost, country and flag. Returns the advanced write pointer.
+ */
 static u_char *
 ngx_http_waf_status_prometheus(u_char *p, u_char *last,
     ngx_http_waf_stat_shm_t *snap, ngx_http_waf_stat_shm_t *sh,

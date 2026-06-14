@@ -90,6 +90,11 @@ ngx_http_waf_errtext_lookup(ngx_uint_t status, ngx_str_t **reason,
 }
 
 
+/*
+ * Synthesize the Apache 2.4 default error body for the response status into
+ * a request-pool buffer returned via out. The reflected Host is HTML-escaped
+ * and the local listen port is filled into the address line.
+ */
 static ngx_int_t
 ngx_http_waf_build_error_page(ngx_http_request_t *r, ngx_str_t *token,
     ngx_str_t *out)
@@ -176,6 +181,12 @@ ngx_http_waf_build_error_page(ngx_http_request_t *r, ngx_str_t *token,
 }
 
 
+/*
+ * Header filter: override the Server header with the configured token on
+ * every response, and when the response is one of nginx's own built-in
+ * text/html error pages, build the Apache replacement body, flag the body
+ * filter to swap it in and fix up Content-Length.
+ */
 static ngx_int_t
 ngx_http_waf_spoof_header_filter(ngx_http_request_t *r)
 {
@@ -248,6 +259,11 @@ ngx_http_waf_spoof_header_filter(ngx_http_request_t *r)
 }
 
 
+/*
+ * Body filter: when the header filter flagged a swap, emit the pre-built
+ * Apache error page as the whole body in place of nginx's, then drop any
+ * trailing buffers. Passes through untouched when no swap is pending.
+ */
 static ngx_int_t
 ngx_http_waf_spoof_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 {

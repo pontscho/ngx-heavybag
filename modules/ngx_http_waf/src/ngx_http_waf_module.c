@@ -882,6 +882,14 @@ ngx_http_waf_create_loc_conf(ngx_conf_t *cf)
 }
 
 
+/*
+ * nginx merge step: for every conf field unset at this location level,
+ * inherit the parent value -- mode (fail-closed default), the compiled
+ * scanner and UA buckets, server token, all reputation data (geo db,
+ * country/asn/flag lists, block and allow CIDR lists), trusted proxies,
+ * the method allow/deny filters and the backend MTA pair. Warns when a
+ * country whitelist is configured without a geo database.
+ */
 static char *
 ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 {
@@ -1003,6 +1011,11 @@ ngx_http_waf_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
 }
 
 
+/*
+ * waf_scanner_list <path>: load the scanner signature list. Guards against
+ * a duplicate directive, then delegates to scanner_compile which reads the
+ * file and compiles the per-action buckets.
+ */
 static char *
 ngx_http_waf_set_scanner_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -1049,6 +1062,10 @@ ngx_http_waf_set_ua_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_geo_db <path>: mmap and attach the geo database for this level.
+ * Rejects a duplicate directive; geo_open does the open and validation.
+ */
 static char *
 ngx_http_waf_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -1070,6 +1087,10 @@ ngx_http_waf_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_geo_block <CC>...: deny clients from the listed countries. Each
+ * ISO-2 country-code argument is appended to the block_cc array.
+ */
 static char *
 ngx_http_waf_set_geo_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -1248,6 +1269,11 @@ ngx_http_waf_set_geo_whitelist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_flag_block <flag>...: deny clients whose geo record carries one of
+ * the named flags (anycast, satellite, ...). Each argument is parsed into
+ * the reputation flag_mask via flag_add.
+ */
 static char *
 ngx_http_waf_set_flag_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -1267,6 +1293,10 @@ ngx_http_waf_set_flag_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_trusted_proxy <CIDR>: append a network to the trusted-proxy list so
+ * its forwarded-for client address is honoured instead of the peer IP.
+ */
 static char *
 ngx_http_waf_set_trusted_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -1281,6 +1311,10 @@ ngx_http_waf_set_trusted_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_blocklist <CIDR>: append a network to the reputation blocklist whose
+ * clients are always denied.
+ */
 static char *
 ngx_http_waf_set_blocklist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -1295,6 +1329,10 @@ ngx_http_waf_set_blocklist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 
+/*
+ * waf_allowlist <CIDR>: append a network to the reputation allowlist whose
+ * clients bypass the reputation checks.
+ */
 static char *
 ngx_http_waf_set_allowlist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
@@ -1438,6 +1476,11 @@ ngx_http_waf_preconfiguration(ngx_conf_t *cf)
 }
 
 
+/*
+ * $waf_type: the UA classification of the client (bot, crawler, ...) as a
+ * string. Allocates the request ctx on first touch and lazily runs the UA
+ * classifier once, then returns the cached category name.
+ */
 static ngx_int_t
 ngx_http_waf_type_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     uintptr_t data)
@@ -1921,6 +1964,12 @@ ngx_http_waf_ja4_init(ngx_conf_t *cf)
 #endif /* NGX_HTTP_SSL && SSL_CLIENT_HELLO_SUCCESS */
 
 
+/*
+ * Module postconfiguration: register the POST_READ and PREACCESS phase
+ * handlers, install the Apache header/error-page spoof filters, assign each
+ * server{} a per-vhost counter slot and add the status shm zone, and (when
+ * built with SSL) install the JA4 client_hello hook on every server SSL_CTX.
+ */
 static ngx_int_t
 ngx_http_waf_postconfiguration(ngx_conf_t *cf)
 {
