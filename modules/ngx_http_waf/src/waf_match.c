@@ -209,8 +209,8 @@ ngx_http_waf_compile_bucket(ngx_conf_t *cf, ngx_array_t *patterns,
 
 
 ngx_int_t
-ngx_http_waf_scanner_compile(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
-    ngx_str_t *path)
+ngx_http_waf_scanner_compile(ngx_conf_t *cf, ngx_str_t *path,
+    ngx_regex_t **re_bucket)
 {
     u_char       *p, *end, *ls, *le, *ps, *pe, *as;
     ngx_str_t     content, *pat, action;
@@ -283,34 +283,32 @@ ngx_http_waf_scanner_compile(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
     }
 
     for (i = 0; i < WAF_ACTION_MAX; i++) {
-        if (ngx_http_waf_compile_bucket(cf, buckets[i], &wlcf->scanner_re[i])
+        if (ngx_http_waf_compile_bucket(cf, buckets[i], &re_bucket[i])
             != NGX_OK)
         {
             return NGX_ERROR;
         }
     }
 
-    wlcf->scanner_list = *path;
-
     ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0,
-        "waf: loaded %ui scanner pattern(s) from \"%V\"", total, path);
+        "waf: loaded %ui signature pattern(s) from \"%V\"", total, path);
 
     return NGX_OK;
 }
 
 
 ngx_int_t
-ngx_http_waf_scanner_lookup(ngx_http_waf_loc_conf_t *wlcf, ngx_str_t *uri)
+ngx_http_waf_scanner_lookup(ngx_regex_t **re_bucket, ngx_str_t *subject)
 {
     ngx_uint_t  i;
 
     for (i = 0; i < WAF_ACTION_MAX; i++) {
 
-        if (wlcf->scanner_re[i] == NULL) {
+        if (re_bucket[i] == NULL) {
             continue;
         }
 
-        if (ngx_regex_exec(wlcf->scanner_re[i], uri, NULL, 0) >= 0) {
+        if (ngx_regex_exec(re_bucket[i], subject, NULL, 0) >= 0) {
             return (ngx_int_t) waf_action_code[i];
         }
     }

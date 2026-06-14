@@ -117,6 +117,41 @@ a=$(getcnt http_blocked_method); assert_delta http_blocked_method "$b" "$a" 1
 code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$A/method-deny")
 [ "$code" = 200 ] && ok "method-deny GET passes (200)" || bad "method-deny GET code=$code"
 
+echo "== request-field signatures (args / cookie / referer) =="
+S=$A/sig
+
+# args: %-decoded match (%27union -> 'union, 404 bucket) -> 404 + blocked_args++
+b=$(getcnt http_blocked_args)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$S?q=%27union")
+[ "$code" = 404 ] && ok "args decoded match returns 404" || bad "args match code=$code"
+a=$(getcnt http_blocked_args); assert_delta http_blocked_args "$b" "$a" 1
+
+# args: 403-bucket pattern (decoded "union select") -> 403
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$S?id=1%20union%20select%202")
+[ "$code" = 403 ] && ok "args union-select returns 403" || bad "args 403 code=$code"
+
+# args: no signature -> 200 (WAF declined, static file served)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$S?q=hello")
+[ "$code" = 200 ] && ok "args non-match passes (200)" || bad "args non-match code=$code"
+
+# cookie: match in a Cookie header value -> 404 + blocked_cookie++
+b=$(getcnt http_blocked_cookie)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" -H 'Cookie: sid=sqlmap' "$S")
+[ "$code" = 404 ] && ok "cookie match returns 404" || bad "cookie match code=$code"
+a=$(getcnt http_blocked_cookie); assert_delta http_blocked_cookie "$b" "$a" 1
+
+# referer: match (404 bucket) -> 404 + blocked_referer++
+b=$(getcnt http_blocked_referer)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" -e 'http://evil.example/x' "$S")
+[ "$code" = 404 ] && ok "referer match returns 404" || bad "referer match code=$code"
+a=$(getcnt http_blocked_referer); assert_delta http_blocked_referer "$b" "$a" 1
+
+# $waf_reason renders the new subject token in the access log
+curl -s -o /dev/null -A "$UA" "$S?q=%27union"
+sleep 1
+tail -20 "$SBX/logs/access-stat.log" | grep -q 'reason=args' \
+    && ok "\$waf_reason=args in access log" || bad "\$waf_reason args missing in log"
+
 echo "== detect mode (passes through, bumps would_block[]) =="
 D=http://127.0.0.1:28082
 
@@ -131,6 +166,12 @@ b=$(getcnt http_would_block_method)
 code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$D/method-detect")
 [ "$code" = 200 ] && ok "detect: denied method passes (200)" || bad "detect method code=$code"
 a=$(getcnt http_would_block_method); assert_delta http_would_block_method "$b" "$a" 1
+
+# args signature under detect -> 200 (passed through) + would_block_args++
+b=$(getcnt http_would_block_args)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$D/sig-detect?q=%27union")
+[ "$code" = 200 ] && ok "detect: args signature passes (200)" || bad "detect args code=$code"
+a=$(getcnt http_would_block_args); assert_delta http_would_block_args "$b" "$a" 1
 
 echo "== JA4 fingerprint (TCP-TLS) =="
 # the client_hello wrapper computes JA4 at handshake; $waf_ja4_hash surfaces it
@@ -210,6 +251,18 @@ curl -s "$STAT/json" | jq -e . >/dev/null 2>&1 && ok "json still parses with wou
 curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="asn"}'         && ok "prom: blocked asn"          || bad "prom missing blocked asn"
 curl -s "$STAT/prometheus" | grep -q 'waf_http_would_block_total{reason="method"}'  && ok "prom: would_block method"   || bad "prom missing would_block method"
 curl -s "$STAT/prometheus" | grep -q 'waf_stream_would_block_total{reason="blocklist"}' && ok "prom: stream would_block" || bad "prom missing stream would_block"
+
+echo "== args/cookie/referer reasons exposed in all 3 formats (auto-extend) =="
+# the WAF_REASON_MAX bump must surface the three new reasons in every format
+curl -s "$STAT/plain" | grep -q '^http_blocked_args '    && ok "plain: http_blocked_args"    || bad "plain missing http_blocked_args"
+curl -s "$STAT/plain" | grep -q '^http_blocked_cookie '  && ok "plain: http_blocked_cookie"  || bad "plain missing http_blocked_cookie"
+curl -s "$STAT/plain" | grep -q '^http_blocked_referer ' && ok "plain: http_blocked_referer" || bad "plain missing http_blocked_referer"
+curl -s "$STAT/json" | jq -e '.http.blocked.args'    >/dev/null 2>&1 && ok "json: http.blocked.args"    || bad "json missing http.blocked.args"
+curl -s "$STAT/json" | jq -e '.http.blocked.cookie'  >/dev/null 2>&1 && ok "json: http.blocked.cookie"  || bad "json missing http.blocked.cookie"
+curl -s "$STAT/json" | jq -e '.http.blocked.referer' >/dev/null 2>&1 && ok "json: http.blocked.referer" || bad "json missing http.blocked.referer"
+curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="args"}'    && ok "prom: blocked args"    || bad "prom missing blocked args"
+curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="cookie"}'  && ok "prom: blocked cookie"  || bad "prom missing blocked cookie"
+curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="referer"}' && ok "prom: blocked referer" || bad "prom missing blocked referer"
 
 echo "== SMTP-auth (reputation_check out==NULL) =="
 # blocked Client-IP (10/8) -> Auth-Status carries the deny reason, no crash

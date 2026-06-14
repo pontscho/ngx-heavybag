@@ -66,7 +66,10 @@ ngx_str_t  waf_reason_str[WAF_REASON_MAX] = {
     ngx_string("empty_ua"),
     ngx_string("scanner_path"),
     ngx_string("asn"),
-    ngx_string("method")
+    ngx_string("method"),
+    ngx_string("args"),
+    ngx_string("cookie"),
+    ngx_string("referer")
 };
 
 
@@ -94,6 +97,8 @@ static char *ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent,
 static char *ngx_http_waf_set_scanner_list(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_ua_list(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_http_waf_set_sig_list(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
@@ -195,6 +200,28 @@ static ngx_command_t  ngx_http_waf_commands[] = {
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       (void *) WAF_UA_BOT },
+
+    /* request-field signature lists: one shared setter, subject in cmd->post */
+    { ngx_string("waf_args_list"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_waf_set_sig_list,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      (void *) WAF_SIG_ARGS },
+
+    { ngx_string("waf_cookie_list"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_waf_set_sig_list,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      (void *) WAF_SIG_COOKIE },
+
+    { ngx_string("waf_referer_list"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_waf_set_sig_list,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      (void *) WAF_SIG_REFERER },
 
     { ngx_string("waf_server_token"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
@@ -631,6 +658,84 @@ ngx_http_waf_method_denied(ngx_http_waf_loc_conf_t *wlcf,
 
 
 /*
+ * %-decode raw into an r->pool buffer, then match it against the action row
+ * re_bucket. The scanner matches the already-decoded r->uri; r->args / Cookie
+ * / Referer are raw, so we decode for byte-consistency (e.g. "%27union" must
+ * match a "'union" pattern). An empty subject or a failed decode alloc yields
+ * NGX_DECLINED (fail-open at the decode step only -- a genuine match still
+ * blocks). Returns the scanner_lookup status code, or NGX_DECLINED on no hit.
+ */
+static ngx_int_t
+ngx_http_waf_sig_lookup_decoded(ngx_http_request_t *r, ngx_regex_t **re_bucket,
+    ngx_str_t *raw)
+{
+    u_char     *dst, *src;
+    ngx_str_t   dec;
+
+    if (raw->len == 0) {
+        return NGX_DECLINED;
+    }
+
+    dst = ngx_pnalloc(r->pool, raw->len);
+    if (dst == NULL) {
+        return NGX_DECLINED;
+    }
+
+    dec.data = dst;
+    src = raw->data;
+    ngx_unescape_uri(&dst, &src, raw->len, 0);   /* %XX -> byte, in place */
+    dec.len = dst - dec.data;
+
+    return ngx_http_waf_scanner_lookup(re_bucket, &dec);
+}
+
+
+/*
+ * Run the cookie signature row against every Cookie request header value
+ * (a client may send more than one), decoding each before the match. A
+ * generic header walk -- not the version-dependent r->headers_in.cookie
+ * slot -- so the build is independent of the nginx header-struct layout.
+ * Returns the first match's status code, or NGX_DECLINED when none match.
+ */
+static ngx_int_t
+ngx_http_waf_sig_cookie_lookup(ngx_http_request_t *r, ngx_regex_t **re_bucket)
+{
+    ngx_int_t         rc;
+    ngx_uint_t        i;
+    ngx_list_part_t  *part;
+    ngx_table_elt_t  *h;
+
+    part = &r->headers_in.headers.part;
+    h = part->elts;
+
+    for (i = 0; /* void */ ; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+            part = part->next;
+            h = part->elts;
+            i = 0;
+        }
+
+        if (h[i].key.len == sizeof("Cookie") - 1
+            && ngx_strncasecmp(h[i].key.data, (u_char *) "Cookie",
+                               sizeof("Cookie") - 1)
+               == 0)
+        {
+            rc = ngx_http_waf_sig_lookup_decoded(r, re_bucket, &h[i].value);
+            if (rc != NGX_DECLINED) {
+                return rc;
+            }
+        }
+    }
+
+    return NGX_DECLINED;
+}
+
+
+/*
  * PREACCESS phase. Order is cheap -> expensive: IP reputation
  * (blocklist/geo/flags) -> bot heuristics (string match) -> scanner regex.
  * Subrequests and internal redirects are never re-scanned.
@@ -799,7 +904,7 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
         return NGX_HTTP_NOT_FOUND;
     }
 
-    rc = ngx_http_waf_scanner_lookup(wlcf, &r->uri);
+    rc = ngx_http_waf_scanner_lookup(wlcf->scanner_re, &r->uri);
     if (rc != NGX_DECLINED) {
         if (ngx_http_waf_finalize_decision(r, ctx, wlcf, WAF_REASON_SCANNER_PATH,
                                            rc) == NGX_DECLINED)
@@ -834,6 +939,72 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
         }
 
         return rc;
+    }
+
+    /*
+     * Request-field signatures (args -> cookie -> referer). Same action-
+     * bucketed machinery as the scanner path; the matched value is %-decoded
+     * first so patterns see the same bytes as the decoded r->uri. First hit
+     * wins and stops the chain. The per-reason counter is bumped inside
+     * finalize_decision (http_blocked[WAF_REASON_*]); there is no extra
+     * action-split counter for these subjects.
+     */
+    rc = ngx_http_waf_sig_lookup_decoded(r, wlcf->sig_re[WAF_SIG_ARGS],
+                                         &r->args);
+    if (rc != NGX_DECLINED) {
+        if (ngx_http_waf_finalize_decision(r, ctx, wlcf, WAF_REASON_ARGS, rc)
+            == NGX_DECLINED)
+        {
+            return NGX_DECLINED;   /* detect: would-block recorded, allow */
+        }
+
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                      "waf: args signature blocked (%i)", rc);
+
+        if (verdict.geo_valid) {
+            ngx_http_waf_stat_cc_bump(sh, cc16, 1);
+        }
+
+        return rc;
+    }
+
+    rc = ngx_http_waf_sig_cookie_lookup(r, wlcf->sig_re[WAF_SIG_COOKIE]);
+    if (rc != NGX_DECLINED) {
+        if (ngx_http_waf_finalize_decision(r, ctx, wlcf, WAF_REASON_COOKIE, rc)
+            == NGX_DECLINED)
+        {
+            return NGX_DECLINED;   /* detect: would-block recorded, allow */
+        }
+
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                      "waf: cookie signature blocked (%i)", rc);
+
+        if (verdict.geo_valid) {
+            ngx_http_waf_stat_cc_bump(sh, cc16, 1);
+        }
+
+        return rc;
+    }
+
+    if (r->headers_in.referer != NULL) {
+        rc = ngx_http_waf_sig_lookup_decoded(r, wlcf->sig_re[WAF_SIG_REFERER],
+                                             &r->headers_in.referer->value);
+        if (rc != NGX_DECLINED) {
+            if (ngx_http_waf_finalize_decision(r, ctx, wlcf, WAF_REASON_REFERER,
+                                               rc) == NGX_DECLINED)
+            {
+                return NGX_DECLINED;   /* detect: would-block recorded, allow */
+            }
+
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                          "waf: referer signature blocked (%i)", rc);
+
+            if (verdict.geo_valid) {
+                ngx_http_waf_stat_cc_bump(sh, cc16, 1);
+            }
+
+            return rc;
+        }
     }
 
     /* allowed: record the (allowlist or none) reason and the allow counters */
@@ -917,6 +1088,15 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     if (conf->scanner_list.data == NULL) {
         conf->scanner_list = prev->scanner_list;
+    }
+
+    /* inherit each whole sig_re[] row when this level defined no such list */
+    for (i = 0; i < WAF_SIG_LIST_MAX; i++) {
+        if (conf->sig_list[i].data == NULL) {
+            conf->sig_list[i] = prev->sig_list[i];
+            ngx_memcpy(conf->sig_re[i], prev->sig_re[i],
+                       sizeof(prev->sig_re[i]));
+        }
     }
 
     ngx_conf_merge_str_value(conf->server_token, prev->server_token,
@@ -1028,9 +1208,45 @@ ngx_http_waf_set_scanner_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     value = cf->args->elts;
 
-    if (ngx_http_waf_scanner_compile(cf, wlcf, &value[1]) != NGX_OK) {
+    if (ngx_http_waf_scanner_compile(cf, &value[1], wlcf->scanner_re)
+        != NGX_OK)
+    {
         return NGX_CONF_ERROR;
     }
+
+    wlcf->scanner_list = value[1];
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * waf_{args,cookie,referer}_list <path>: load an action-bucketed signature
+ * list into one sig_re[cat][] row. The subject category is carried in
+ * cmd->post so the three directives share this single setter (mirrors
+ * ngx_http_waf_set_ua_list). Reuses the scanner compile machinery verbatim;
+ * the only WAF difference is which request field is matched at runtime.
+ */
+static char *
+ngx_http_waf_set_sig_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_waf_loc_conf_t  *wlcf = conf;
+    ngx_str_t                *value = cf->args->elts;
+    ngx_http_waf_sig_e        cat;
+
+    cat = (ngx_http_waf_sig_e) (uintptr_t) cmd->post;
+
+    if (wlcf->sig_list[cat].data != NULL) {
+        return "is duplicate";
+    }
+
+    if (ngx_http_waf_scanner_compile(cf, &value[1], wlcf->sig_re[cat])
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    wlcf->sig_list[cat] = value[1];
 
     return NGX_CONF_OK;
 }

@@ -17,19 +17,24 @@
 
 
 /*
- * Read and compile the scanner list referenced by *path into wlcf's
- * per-action regex buckets. Runs at configuration time (directive setter).
+ * Read and compile the signature list referenced by *path into re_bucket,
+ * a WAF_ACTION_MAX-sized row of per-action regex slots (the caller owns the
+ * row: scanner_re[] or one sig_re[cat][] row). Each non-comment line is
+ * "<pattern>[ <action>]"; patterns sharing an action compile to one
+ * alternation. Runs at configuration time (directive setter); the caller
+ * sets its own duplicate-guard string. Reload-safe via cf->pool.
  */
-ngx_int_t ngx_http_waf_scanner_compile(ngx_conf_t *cf,
-    ngx_http_waf_loc_conf_t *wlcf, ngx_str_t *path);
+ngx_int_t ngx_http_waf_scanner_compile(ngx_conf_t *cf, ngx_str_t *path,
+    ngx_regex_t **re_bucket);
 
 /*
- * Match uri against the compiled buckets in action order. Returns the
- * nginx status code to finalize with (NGX_HTTP_NOT_FOUND / _FORBIDDEN /
- * NGX_HTTP_CLOSE) on a hit, or NGX_DECLINED when nothing matches.
+ * Match subject against the compiled buckets in re_bucket in action order.
+ * Returns the nginx status code to finalize with (NGX_HTTP_NOT_FOUND /
+ * _FORBIDDEN / NGX_HTTP_CLOSE) on a hit, or NGX_DECLINED when nothing
+ * matches. NULL bucket slots are skipped.
  */
-ngx_int_t ngx_http_waf_scanner_lookup(ngx_http_waf_loc_conf_t *wlcf,
-    ngx_str_t *uri);
+ngx_int_t ngx_http_waf_scanner_lookup(ngx_regex_t **re_bucket,
+    ngx_str_t *subject);
 
 /*
  * Read and compile one config-file UA signature list into wlcf's ua_re[cat]
