@@ -59,7 +59,7 @@ dead rules) with compiled, anchored, hot-reloadable rules.
 │       └── waf_stream.c            ngx_stream_waf_module (L4 reputation head)
 ├── geodb/
 │   ├── location.db              IPFire location database (uncompressed)
-├── reference/                   nanolibloc.c (basis), loctest.c (geo oracle)
+├── reference/                   nanolibloc.c (basis), loctest.c (geo oracle), locverify.c (signature oracle)
 ├── sandbox/                     runnable test env AND the build install prefix
 │   ├── nginx.conf               full HTTP + mail example config   (tracked)
 │   ├── certs/                   self-signed test cert/key          (tracked)
@@ -453,6 +453,29 @@ flagged or blocklisted IP is denied even from a whitelisted country.
 The database is `mmap`'d read-only and `munmap`'d on reload, so updating
 it is a config reload — replace `geodb/location.db` atomically and run
 `nginx -s reload` (no restart needed for a DB swap).
+
+#### Signature verification (load-time, fail-closed)
+
+The `location.db` is **cryptographically verified at load time**, every config
+parse/reload, before any block offset in it is trusted. libloc embeds an
+**ECDSA P-521 / SHA-512** signature in the database header; the WAF reproduces
+libloc's `loc_database_verify` with OpenSSL (already linked for JA4 — **no
+libloc dependency**) against the **pinned IPFire signing public key**
+(secp521r1, stable since 2019), which is compiled into the module — there is no
+directive and no opt-out.
+
+The check is **mandatory and fail-closed**: an **unsigned**, **tampered**, or
+**truncated/corrupted** DB — or any OpenSSL error — makes `ngx_http_waf_geo_open`
+return `NGX_CONF_ERROR`, so **`nginx -t` fails and nginx refuses to start or
+reload** (the previous config keeps running on a failed reload). The signature
+is dual-slot for key rotation: either slot validating is accepted, and neither
+is forgeable without IPFire's private key. A genuine **key rotation (multi-year
+horizon) requires rebuilding this module** with the new pinned key.
+
+Cost is **config-time only** — one SHA-512 pass over the DB (~60 MB today) per
+load/reload, with **zero request-path impact**. Oversized files are rejected by
+a size cap (512 MiB) before `mmap`, so a hostile or runaway DB cannot stall a
+reload by being hashed first.
 
 `waf_flag_block` is a convenience: each flag also adds the corresponding
 IPFire special country code to the block list (`anonymous-proxy`→A1,
