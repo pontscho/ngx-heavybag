@@ -16,6 +16,7 @@ waf_deps="$ngx_addon_dir/src/ngx_http_waf.h \
          $ngx_addon_dir/src/waf_spoof.h \
          $ngx_addon_dir/src/waf_geo.h \
          $ngx_addon_dir/src/waf_rep.h \
+         $ngx_addon_dir/src/waf_rate.h \
          $ngx_addon_dir/src/waf_reputation.h \
          $ngx_addon_dir/src/waf_authhttp.h \
          $ngx_addon_dir/src/waf_status.h \
@@ -26,6 +27,7 @@ waf_srcs="$ngx_addon_dir/src/ngx_http_waf_module.c \
          $ngx_addon_dir/src/waf_spoof.c \
          $ngx_addon_dir/src/waf_geo.c \
          $ngx_addon_dir/src/waf_reputation.c \
+         $ngx_addon_dir/src/waf_rate.c \
          $ngx_addon_dir/src/waf_authhttp.c \
          $ngx_addon_dir/src/waf_stream.c \
          $ngx_addon_dir/src/waf_status.c \

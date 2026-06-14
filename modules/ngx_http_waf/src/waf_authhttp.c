@@ -11,6 +11,8 @@
 #include "ngx_http_waf.h"
 #include "waf_authhttp.h"
 #include "waf_reputation.h"
+#include "waf_status.h"
+#include "waf_rate.h"
 
 
 static ngx_table_elt_t *ngx_http_waf_add_header(ngx_http_request_t *r,
@@ -33,12 +35,16 @@ static ngx_str_t  ngx_http_waf_auth_ok = ngx_string("OK");
 ngx_int_t
 ngx_http_waf_authhttp_handler(ngx_http_request_t *r)
 {
-    ngx_int_t                 rc;
-    ngx_str_t                 reason;
-    ngx_str_t                *client_ip = NULL;
-    ngx_addr_t                addr;
-    struct sockaddr          *sa;
-    ngx_http_waf_loc_conf_t  *wlcf;
+    ngx_int_t                  rc;
+    ngx_str_t                  reason;
+    ngx_str_t                 *client_ip = NULL;
+    ngx_addr_t                 addr;
+    struct sockaddr           *sa;
+    ngx_http_waf_verdict_t     verdict;
+    ngx_http_waf_loc_conf_t   *wlcf;
+    ngx_http_waf_main_conf_t  *wmcf;
+    ngx_http_waf_rate_rule_t  *rate_rule;
+    ngx_http_waf_stat_shm_t   *sh;
 
     /* auth_http issues GET; discard any body and ignore the method. */
     rc = ngx_http_discard_request_body(r);
@@ -82,8 +88,12 @@ ngx_http_waf_authhttp_handler(ngx_http_request_t *r)
         sa = r->connection->sockaddr;
     }
 
-    /* SMTP-auth wants no geo side data: pass NULL (the out NULL-guard path). */
-    rc = ngx_http_waf_reputation_check(&wlcf->rep, sa, &reason, NULL);
+    /*
+     * The verdict side data drives the rate-limit rule selection (for_geo);
+     * geo_valid stays 0 unless this location has a waf_geo_db, in which case
+     * the default rule applies.
+     */
+    rc = ngx_http_waf_reputation_check(&wlcf->rep, sa, &reason, &verdict);
 
     if (rc != NGX_DECLINED) {
         if (client_ip != NULL) {
@@ -95,6 +105,41 @@ ngx_http_waf_authhttp_handler(ngx_http_request_t *r)
                           "waf: mail reputation block peer (%V)", &reason);
         }
         return ngx_http_waf_authhttp_deny(r, &reason);
+    }
+
+    /*
+     * Reputation allowed: per-IP rate limit. No detect mode here (the auth
+     * endpoint always enforces). The mail head has no per-vhost slot, so a
+     * rate deny is booked on the global http_blocked[RATE_LIMIT] + http_resp_429
+     * counters. The backing zone is the HTTP head's waf_rate_zone.
+     */
+    if (wlcf->rate_rules != NULL) {
+        rate_rule = ngx_http_waf_rate_rule_select(wlcf->rate_rules, &verdict);
+
+        if (rate_rule != NULL) {
+            wmcf = ngx_http_get_module_main_conf(r, ngx_http_waf_module);
+
+            if (ngx_http_waf_rate_check(
+                    (wmcf->rate_zone != NULL) ? wmcf->rate_zone->data : NULL,
+                    sa, rate_rule->rate_num_fp, rate_rule->period_ms,
+                    rate_rule->burst_fp)
+                == NGX_BUSY)
+            {
+                ngx_str_t  rl = ngx_string("rate limit");
+
+                sh = (wmcf->stat_zone != NULL) ? wmcf->stat_zone->data : NULL;
+                if (sh != NULL) {
+                    (void) ngx_atomic_fetch_add(
+                        &sh->http_blocked[WAF_REASON_RATE_LIMIT], 1);
+                    (void) ngx_atomic_fetch_add(&sh->http_resp_429, 1);
+                }
+
+                ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                              "waf: mail rate limit exceeded");
+
+                return ngx_http_waf_authhttp_deny(r, &rl);
+            }
+        }
     }
 
     return ngx_http_waf_authhttp_allow(r, wlcf);

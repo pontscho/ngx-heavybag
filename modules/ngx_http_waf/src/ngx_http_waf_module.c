@@ -14,6 +14,7 @@
 #include "waf_reputation.h"
 #include "waf_authhttp.h"
 #include "waf_status.h"
+#include "waf_rate.h"
 #include "waf_ja4.h"
 
 #if (NGX_HTTP_SSL)
@@ -70,7 +71,8 @@ ngx_str_t  waf_reason_str[WAF_REASON_MAX] = {
     ngx_string("args"),
     ngx_string("cookie"),
     ngx_string("referer"),
-    ngx_string("fake_bot")
+    ngx_string("fake_bot"),
+    ngx_string("rate_limit")
 };
 
 
@@ -128,6 +130,10 @@ static char *ngx_http_waf_set_mail_auth(ngx_conf_t *cf, ngx_command_t *cmd,
 static char *ngx_http_waf_set_mail_backend(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_status(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_http_waf_set_rate_zone(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_http_waf_set_rate_limit(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_int_t ngx_http_waf_preconfiguration(ngx_conf_t *cf);
 static ngx_int_t ngx_http_waf_postconfiguration(ngx_conf_t *cf);
@@ -337,6 +343,22 @@ static ngx_command_t  ngx_http_waf_commands[] = {
     { ngx_string("waf_status"),
       NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS,
       ngx_http_waf_set_status,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* one process-wide per-IP rate-limit shm zone, declared in http{} and
+     * shared with the stream head; must precede any waf_rate_limit use */
+    { ngx_string("waf_rate_zone"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
+      ngx_http_waf_set_rate_zone,
+      NGX_HTTP_MAIN_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("waf_rate_limit"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+      ngx_http_waf_set_rate_limit,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
@@ -570,6 +592,9 @@ ngx_http_waf_stat_http_block(ngx_http_waf_stat_shm_t *sh, ngx_uint_t idx,
     case NGX_HTTP_CLOSE:
         (void) ngx_atomic_fetch_add(&sh->http_resp_444, 1);
         break;
+    case NGX_HTTP_TOO_MANY_REQUESTS:
+        (void) ngx_atomic_fetch_add(&sh->http_resp_429, 1);
+        break;
     default:
         break;
     }
@@ -775,6 +800,7 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
     ngx_http_waf_srv_conf_t    *wscf;
     ngx_http_waf_main_conf_t   *wmcf;
     ngx_http_waf_stat_vhost_t  *v;
+    ngx_http_waf_rate_rule_t   *rate_rule;
 
     if (r != r->main) {
         return NGX_DECLINED;
@@ -888,6 +914,41 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
             ngx_http_waf_stat_cc_bump(sh, cc16, 1);
         }
         return NGX_HTTP_NOT_FOUND;
+    }
+
+    /*
+     * Per-IP rate limit (token bucket). The rule is selected by reputation
+     * (for_geo); a NULL rule means no limit applies to this client. The
+     * backing zone is on the main conf (HTTP-owned, shared with the stream
+     * head). NGX_BUSY -> 429, funnelled through the detect-aware finalizer
+     * like every other block point. The manual cc_bump runs only when the
+     * finalizer actually blocks (enforce), never in detect mode.
+     */
+    if (wlcf->rate_rules != NULL) {
+        rate_rule = ngx_http_waf_rate_rule_select(wlcf->rate_rules, &verdict);
+        if (rate_rule != NULL
+            && ngx_http_waf_rate_check(
+                   (wmcf->rate_zone != NULL) ? wmcf->rate_zone->data : NULL,
+                   sa, rate_rule->rate_num_fp, rate_rule->period_ms,
+                   rate_rule->burst_fp)
+               == NGX_BUSY)
+        {
+            if (ngx_http_waf_finalize_decision(r, ctx, wlcf,
+                    WAF_REASON_RATE_LIMIT, NGX_HTTP_TOO_MANY_REQUESTS)
+                == NGX_DECLINED)
+            {
+                return NGX_DECLINED;   /* detect: would-block recorded, allow */
+            }
+
+            ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                          "waf: rate limit exceeded");
+
+            if (verdict.geo_valid) {
+                ngx_http_waf_stat_cc_bump(sh, cc16, 1);
+            }
+
+            return NGX_HTTP_TOO_MANY_REQUESTS;
+        }
     }
 
     /*
@@ -1214,6 +1275,11 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     if (conf->mail_backend_addr.data == NULL) {
         conf->mail_backend_addr = prev->mail_backend_addr;
         conf->mail_backend_port = prev->mail_backend_port;
+    }
+
+    /* rate-limit rules: inherit the whole set when this level defined none */
+    if (conf->rate_rules == NULL) {
+        conf->rate_rules = prev->rate_rules;
     }
 
     return NGX_CONF_OK;
@@ -1752,6 +1818,92 @@ ngx_http_waf_set_status(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     clcf->handler = ngx_http_waf_status_handler;
 
     return NGX_CONF_OK;
+}
+
+
+/*
+ * waf_rate_zone size=<size>: declare the single process-wide per-IP rate-limit
+ * shm zone (http{} main scope). Created immediately (like limit_req_zone) so a
+ * later waf_rate_limit can verify the zone exists; the stream head resolves the
+ * SAME zone size-0. The argument follows the standard "size=10m" form.
+ */
+static char *
+ngx_http_waf_set_rate_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ssize_t                    size;
+    ngx_str_t                 *value, name, s;
+    ngx_shm_zone_t            *zone;
+    ngx_http_waf_main_conf_t  *wmcf;
+
+    wmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_waf_module);
+
+    if (wmcf->rate_zone != NULL) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (value[1].len <= 5 || ngx_strncmp(value[1].data, "size=", 5) != 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "waf_rate_zone: expected \"size=<size>\"");
+        return NGX_CONF_ERROR;
+    }
+
+    s.data = value[1].data + 5;
+    s.len = value[1].len - 5;
+
+    size = ngx_parse_size(&s);
+    if (size == NGX_ERROR || size < (ssize_t) (8 * ngx_pagesize)) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "waf_rate_zone: invalid or too-small size \"%V\" "
+                           "(need at least %uz bytes)",
+                           &value[1], (size_t) (8 * ngx_pagesize));
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_str_set(&name, "waf_rate");
+
+    zone = ngx_shared_memory_add(cf, &name, (size_t) size,
+                                 &ngx_http_waf_module);
+    if (zone == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    if (zone->init != NULL) {
+        return "is duplicate";
+    }
+
+    zone->init = ngx_http_waf_rate_init_zone;
+    /* zone->data left NULL: init sizes the table from shm.size */
+
+    wmcf->rate_zone = zone;
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * waf_rate_limit rate=Nr/s|Nr/m|Nr/h [burst=N] [for_geo=CC,...]: append a
+ * per-IP token-bucket rule to this location. Requires waf_rate_zone to be
+ * declared earlier in http{} (the shared backing store). The parse + bounds
+ * checks live in ngx_http_waf_rate_rule_add (shared with the stream head).
+ */
+static char *
+ngx_http_waf_set_rate_limit(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_waf_loc_conf_t   *wlcf = conf;
+    ngx_http_waf_main_conf_t  *wmcf;
+
+    wmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_waf_module);
+
+    if (wmcf->rate_zone == NULL) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "waf_rate_limit requires a waf_rate_zone declared "
+                           "earlier in http{}");
+        return NGX_CONF_ERROR;
+    }
+
+    return ngx_http_waf_rate_rule_add(cf, &wlcf->rate_rules);
 }
 
 

@@ -81,6 +81,7 @@ typedef struct {
     ngx_atomic_t  http_resp_403;
     ngx_atomic_t  http_resp_404;
     ngx_atomic_t  http_resp_444;
+    ngx_atomic_t  http_resp_429;
     ngx_atomic_t  http_ua[WAF_UA_MAX];
     ngx_atomic_t  flag_blocked[WAF_FLAG_SLOTS];
 
@@ -115,6 +116,7 @@ typedef struct {
  */
 typedef struct {
     ngx_shm_zone_t  *stat_zone;
+    ngx_shm_zone_t  *rate_zone;   /* per-IP rate-limit zone (waf_rate_zone) */
     ngx_uint_t       nvhosts;
 } ngx_http_waf_main_conf_t;
 
