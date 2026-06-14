@@ -212,6 +212,42 @@ sleep 1
 tail -20 "$SBX/logs/access-stat.log" | grep -q 'reason=fake_bot' \
     && ok "\$waf_reason=fake_bot in access log" || bad "\$waf_reason fake_bot missing in log"
 
+echo "== per-IP rate limit (token bucket) =="
+# /rate has burst=3: the loopback peer gets 3 allowed (200) then 429. Refill at
+# 5r/m is negligible on the ms test scale, so the cutoff is deterministic. This
+# drains the SHARED loopback bucket, which the detect + stream rate tests below
+# then rely on being empty.
+b_blk=$(getcnt http_blocked_rate_limit)
+b_429=$(getcnt http_resp_429)
+n200=0; n429=0
+for i in 1 2 3 4 5; do
+    c=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$A/rate")
+    [ "$c" = 200 ] && n200=$((n200+1))
+    [ "$c" = 429 ] && n429=$((n429+1))
+done
+[ "$n200" = 3 ] && ok "rate: first 3 requests allowed (200)" || bad "rate: 200 count=$n200 (want 3)"
+[ "$n429" = 2 ] && ok "rate: over-limit requests get 429"   || bad "rate: 429 count=$n429 (want 2)"
+a=$(getcnt http_blocked_rate_limit); assert_delta http_blocked_rate_limit "$b_blk" "$a" 2
+a=$(getcnt http_resp_429);          assert_delta http_resp_429          "$b_429" "$a" 2
+
+# P5(c): with no waf_trusted_proxy, X-Forwarded-For must NOT change the rate key
+# -> a spoofed XFF cannot earn a fresh bucket; the drained loopback bucket still
+# rejects (the limit pins to the real peer, not the header).
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" -H 'X-Forwarded-For: 1.2.3.4' "$A/rate")
+[ "$code" = 429 ] && ok "rate: untrusted XFF does not bypass the per-IP limit" || bad "rate XFF bypass code=$code"
+
+# $waf_reason renders the rate_limit token in the access log
+sleep 1
+tail -40 "$SBX/logs/access-stat.log" | grep -q 'reason=rate_limit' \
+    && ok "\$waf_reason=rate_limit in access log" || bad "\$waf_reason rate_limit missing in log"
+
+# detect mode: the shared loopback bucket is now drained, so /rate-detect sees
+# over-limit -> passes through (200) and bumps would_block[rate_limit].
+b=$(getcnt http_would_block_rate_limit)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$D/rate-detect")
+[ "$code" = 200 ] && ok "detect: rate limit passes (200)" || bad "detect rate code=$code"
+a=$(getcnt http_would_block_rate_limit); assert_delta http_would_block_rate_limit "$b" "$a" 1
+
 echo "== JA4 fingerprint (TCP-TLS) =="
 # the client_hello wrapper computes JA4 at handshake; $waf_ja4_hash surfaces it
 ja4=$(curl -sk -o /dev/null -D - "https://127.0.0.1:28443/ja4" \
@@ -274,6 +310,15 @@ curl -s --max-time 2 -o /dev/null -A "$UA" "http://127.0.0.1:29092/" 2>/dev/null
 sleep 1
 a=$(getcnt stream_would_block_blocklist); assert_delta stream_would_block_blocklist "$b" "$a" 1
 
+# rate limit at L4 (29093, burst=2). The loopback bucket is SHARED with the HTTP
+# rate locations and was drained above, so over-budget connections are closed
+# -> stream_denied[rate_limit] climbs. Assert >=1 (order-independent).
+b=$(getcnt stream_denied_rate_limit)
+for i in 1 2 3 4; do curl -s --max-time 2 -o /dev/null -A "$UA" "http://127.0.0.1:29093/" 2>/dev/null; done
+sleep 1
+a=$(getcnt stream_denied_rate_limit)
+[ $((a - b)) -ge 1 ] && ok "stream rate limit denies over-budget connections (+$((a-b)))" || bad "stream rate: want >=1 got +$((a-b))"
+
 echo "== asn/method reasons + would_block exposed in all 3 formats =="
 # new reasons render automatically in the WAF_REASON_MAX-driven blocked loops
 curl -s "$STAT/plain" | grep -q '^http_blocked_asn '          && ok "plain: http_blocked_asn"          || bad "plain missing http_blocked_asn"
@@ -313,6 +358,21 @@ curl -s "$STAT/prometheus" | grep -q 'waf_http_would_block_total{reason="fake_bo
 # truncation guard: the extra reason must not push the body past WAF_STAT_FIXED_LINES
 curl -s "$STAT/json" | jq -e . >/dev/null 2>&1 && ok "json still parses with fake_bot (no truncation)" || bad "json truncated/broken by fake_bot"
 
+echo "== rate_limit reason + http_resp_429 + rate_overflow in all 3 formats =="
+curl -s "$STAT/plain" | grep -q '^http_blocked_rate_limit '     && ok "plain: http_blocked_rate_limit"     || bad "plain missing http_blocked_rate_limit"
+curl -s "$STAT/plain" | grep -q '^http_would_block_rate_limit ' && ok "plain: http_would_block_rate_limit" || bad "plain missing http_would_block_rate_limit"
+curl -s "$STAT/plain" | grep -q '^http_resp_429 '               && ok "plain: http_resp_429"               || bad "plain missing http_resp_429"
+curl -s "$STAT/plain" | grep -q '^rate_overflow '              && ok "plain: rate_overflow"              || bad "plain missing rate_overflow"
+curl -s "$STAT/plain" | grep -q '^stream_denied_rate_limit '    && ok "plain: stream_denied_rate_limit"    || bad "plain missing stream_denied_rate_limit"
+curl -s "$STAT/json" | jq -e '.http.blocked.rate_limit'   >/dev/null 2>&1 && ok "json: http.blocked.rate_limit"  || bad "json missing http.blocked.rate_limit"
+curl -s "$STAT/json" | jq -e '.http.responses."429"'      >/dev/null 2>&1 && ok "json: http.responses.429"       || bad "json missing http.responses.429"
+curl -s "$STAT/json" | jq -e '.rate_overflow'            >/dev/null 2>&1 && ok "json: rate_overflow"            || bad "json missing rate_overflow"
+curl -s "$STAT/json" | jq -e '.stream.denied.rate_limit'  >/dev/null 2>&1 && ok "json: stream.denied.rate_limit" || bad "json missing stream.denied.rate_limit"
+curl -s "$STAT/json" | jq -e . >/dev/null 2>&1 && ok "json still parses with rate_limit/429/overflow" || bad "json broken by rate additions"
+curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="rate_limit"}' && ok "prom: blocked rate_limit" || bad "prom missing blocked rate_limit"
+curl -s "$STAT/prometheus" | grep -q 'waf_http_responses_total{code="429"}'        && ok "prom: responses 429"     || bad "prom missing responses 429"
+curl -s "$STAT/prometheus" | grep -q '^waf_rate_overflow_total '                   && ok "prom: rate_overflow"     || bad "prom missing rate_overflow"
+
 echo "== SMTP-auth (reputation_check out==NULL) =="
 # blocked Client-IP (10/8) -> Auth-Status carries the deny reason, no crash
 hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 10.1.2.3' http://127.0.0.1:28081/waf-mail-auth)
@@ -320,6 +380,15 @@ echo "$hdr" | grep -qi 'Auth-Status: static blocklist' && ok "mail-auth deny (ou
 # allowed Client-IP -> Auth-Status: OK
 hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 8.8.8.8' http://127.0.0.1:28081/waf-mail-auth)
 echo "$hdr" | grep -qi 'Auth-Status: OK' && ok "mail-auth allow (out==NULL safe)" || bad "mail-auth allow header: $(echo "$hdr" | grep -i auth-status)"
+
+# rate limit per Client-IP: 8.8.4.4 is reputation-allowed; burst=2 -> the 3rd
+# request in a quick burst is rate-limited. Independent bucket from 8.8.8.8.
+hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
+echo "$hdr" | grep -qi 'Auth-Status: OK' && ok "mail-auth rate req1 OK" || bad "mail rate req1: $(echo "$hdr" | grep -i auth-status)"
+hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
+echo "$hdr" | grep -qi 'Auth-Status: OK' && ok "mail-auth rate req2 OK" || bad "mail rate req2: $(echo "$hdr" | grep -i auth-status)"
+hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
+echo "$hdr" | grep -qi 'Auth-Status: rate limit' && ok "mail-auth 3rd request rate-limited" || bad "mail rate req3: $(echo "$hdr" | grep -i auth-status)"
 
 echo "== reload preserves counters =="
 before=$(getcnt http_requests_total)
@@ -399,6 +468,30 @@ CAP=$(( 512 * 1024 * 1024 ))
 [ "$DBSIZE" -lt "$CAP" ] && ok "real DB ($DBSIZE) under 512 MiB cap" || bad "real DB ($DBSIZE) exceeds cap ($CAP)"
 
 rm -rf "$VTMP"
+
+echo "== rate-limit config guard (P4/P5: waf_rate_limit requires waf_rate_zone) =="
+# A waf_rate_limit with no waf_rate_zone declared must fail nginx -t at parse
+# (the HTTP setter's ordering guard), not silently no-op.
+RTMP=$(mktemp -d)
+cat > "$RTMP/r.conf" <<EOF
+load_module $SBX/modules/ngx_http_waf_module.so;
+worker_processes 1;
+pid $RTMP/r.pid;
+error_log $RTMP/r-error.log info;
+events { worker_connections 64; }
+http {
+    server {
+        listen 127.0.0.1:28097;
+        server_name rl.test;
+        location = /x { waf_rate_limit rate=10r/s burst=10; }
+    }
+}
+EOF
+"$NGINX" -p "$SBX/" -c "$RTMP/r.conf" -t 2>"$RTMP/out.log"
+[ $? -ne 0 ] && ok "waf_rate_limit without zone: nginx -t fails" || bad "waf_rate_limit without zone: unexpectedly OK"
+grep -q 'requires a waf_rate_zone' "$RTMP/out.log" \
+    && ok "waf_rate_limit without zone: guard message logged" || bad "waf_rate_limit zone guard message missing"
+rm -rf "$RTMP"
 
 echo
 echo "==================  RESULT: $pass passed, $fail failed  =================="

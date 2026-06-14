@@ -17,6 +17,7 @@
 #include "ngx_http_waf.h"
 #include "waf_geo.h"
 #include "waf_status.h"
+#include "waf_rate.h"
 
 
 #define WAF_STAT_FMT_PLAIN       0
@@ -121,7 +122,7 @@ ngx_http_waf_cc_chars(uint16_t cc16, u_char out[2])
  * extra WAF_REASON_MAX loops budgeted for would_block. Must stay >= the number
  * of unconditional lines the serializer emits.
  */
-#define WAF_STAT_FIXED_LINES  96
+#define WAF_STAT_FIXED_LINES  112
 
 /*
  * Compute a true upper bound on the rendered body size. Each metric line is
@@ -179,7 +180,7 @@ static u_char *
 ngx_http_waf_status_plain(u_char *p, u_char *last,
     ngx_http_waf_stat_shm_t *snap, ngx_http_waf_stat_shm_t *sh,
     ngx_uint_t nvhosts, ngx_http_core_srv_conf_t **cscfp,
-    ngx_http_waf_geo_db_t *geo_db)
+    ngx_http_waf_geo_db_t *geo_db, ngx_atomic_uint_t rate_overflow)
 {
     u_char                      cc[2];
     time_t                      now;
@@ -229,12 +230,14 @@ ngx_http_waf_status_plain(u_char *p, u_char *last,
                      "http_resp_403 %uA\n"
                      "http_resp_404 %uA\n"
                      "http_resp_444 %uA\n"
+                     "http_resp_429 %uA\n"
                      "http_scanner_path_404 %uA\n"
                      "http_scanner_path_403 %uA\n"
                      "http_scanner_path_444 %uA\n",
                      (ngx_atomic_uint_t) snap->http_resp_403,
                      (ngx_atomic_uint_t) snap->http_resp_404,
                      (ngx_atomic_uint_t) snap->http_resp_444,
+                     (ngx_atomic_uint_t) snap->http_resp_429,
                      (ngx_atomic_uint_t) snap->http_scanner_path[WAF_ACTION_404],
                      (ngx_atomic_uint_t) snap->http_scanner_path[WAF_ACTION_403],
                      (ngx_atomic_uint_t) snap->http_scanner_path[WAF_ACTION_444]);
@@ -269,8 +272,11 @@ ngx_http_waf_status_plain(u_char *p, u_char *last,
                          (ngx_atomic_uint_t) snap->stream_would_block[i]);
     }
 
-    p = ngx_snprintf(p, last - p, "cc_overflow %uA\n",
-                     (ngx_atomic_uint_t) snap->cc_overflow);
+    p = ngx_snprintf(p, last - p,
+                     "cc_overflow %uA\n"
+                     "rate_overflow %uA\n",
+                     (ngx_atomic_uint_t) snap->cc_overflow,
+                     rate_overflow);
 
     for (i = 0; i < WAF_STAT_CC_SLOTS; i++) {
         if (snap->cc[i].cc16 == 0) {
@@ -342,7 +348,7 @@ static u_char *
 ngx_http_waf_status_json(u_char *p, u_char *last,
     ngx_http_waf_stat_shm_t *snap, ngx_http_waf_stat_shm_t *sh,
     ngx_uint_t nvhosts, ngx_http_core_srv_conf_t **cscfp,
-    ngx_http_waf_geo_db_t *geo_db)
+    ngx_http_waf_geo_db_t *geo_db, ngx_atomic_uint_t rate_overflow)
 {
     u_char                      cc[2];
     time_t                      now;
@@ -389,12 +395,14 @@ ngx_http_waf_status_json(u_char *p, u_char *last,
     }
 
     p = ngx_snprintf(p, last - p,
-                     "},\"responses\":{\"403\":%uA,\"404\":%uA,\"444\":%uA},"
+                     "},\"responses\":{\"403\":%uA,\"404\":%uA,\"444\":%uA,"
+                     "\"429\":%uA},"
                      "\"scanner_path\":{\"404\":%uA,\"403\":%uA,\"444\":%uA},"
                      "\"ua\":{",
                      (ngx_atomic_uint_t) snap->http_resp_403,
                      (ngx_atomic_uint_t) snap->http_resp_404,
                      (ngx_atomic_uint_t) snap->http_resp_444,
+                     (ngx_atomic_uint_t) snap->http_resp_429,
                      (ngx_atomic_uint_t) snap->http_scanner_path[WAF_ACTION_404],
                      (ngx_atomic_uint_t) snap->http_scanner_path[WAF_ACTION_403],
                      (ngx_atomic_uint_t) snap->http_scanner_path[WAF_ACTION_444]);
@@ -435,8 +443,10 @@ ngx_http_waf_status_json(u_char *p, u_char *last,
         first = 0;
     }
 
-    p = ngx_snprintf(p, last - p, "}},\"cc_overflow\":%uA,\"countries\":[",
-                     (ngx_atomic_uint_t) snap->cc_overflow);
+    p = ngx_snprintf(p, last - p,
+                     "}},\"cc_overflow\":%uA,\"rate_overflow\":%uA,"
+                     "\"countries\":[",
+                     (ngx_atomic_uint_t) snap->cc_overflow, rate_overflow);
 
     for (i = 0, first = 1; i < WAF_STAT_CC_SLOTS; i++) {
         if (snap->cc[i].cc16 == 0) {
@@ -491,7 +501,7 @@ static u_char *
 ngx_http_waf_status_prometheus(u_char *p, u_char *last,
     ngx_http_waf_stat_shm_t *snap, ngx_http_waf_stat_shm_t *sh,
     ngx_uint_t nvhosts, ngx_http_core_srv_conf_t **cscfp,
-    ngx_http_waf_geo_db_t *geo_db)
+    ngx_http_waf_geo_db_t *geo_db, ngx_atomic_uint_t rate_overflow)
 {
     u_char                      cc[2];
     time_t                      now;
@@ -547,10 +557,12 @@ ngx_http_waf_status_prometheus(u_char *p, u_char *last,
     p = ngx_snprintf(p, last - p,
                      "waf_http_responses_total{code=\"403\"} %uA\n"
                      "waf_http_responses_total{code=\"404\"} %uA\n"
-                     "waf_http_responses_total{code=\"444\"} %uA\n",
+                     "waf_http_responses_total{code=\"444\"} %uA\n"
+                     "waf_http_responses_total{code=\"429\"} %uA\n",
                      (ngx_atomic_uint_t) snap->http_resp_403,
                      (ngx_atomic_uint_t) snap->http_resp_404,
-                     (ngx_atomic_uint_t) snap->http_resp_444);
+                     (ngx_atomic_uint_t) snap->http_resp_444,
+                     (ngx_atomic_uint_t) snap->http_resp_429);
 
     for (i = 0; i < WAF_UA_MAX; i++) {
         p = ngx_snprintf(p, last - p, "waf_ua_total{class=\"%V\"} %uA\n",
@@ -578,8 +590,10 @@ ngx_http_waf_status_prometheus(u_char *p, u_char *last,
                          (ngx_atomic_uint_t) snap->stream_would_block[i]);
     }
 
-    p = ngx_snprintf(p, last - p, "waf_cc_overflow_total %uA\n",
-                     (ngx_atomic_uint_t) snap->cc_overflow);
+    p = ngx_snprintf(p, last - p,
+                     "waf_cc_overflow_total %uA\n"
+                     "waf_rate_overflow_total %uA\n",
+                     (ngx_atomic_uint_t) snap->cc_overflow, rate_overflow);
 
     for (i = 0; i < WAF_STAT_CC_SLOTS; i++) {
         if (snap->cc[i].cc16 == 0) {
@@ -647,6 +661,7 @@ ngx_http_waf_status_handler(ngx_http_request_t *r)
     ngx_buf_t                   *b;
     ngx_uint_t                   fmt, nvhosts;
     ngx_chain_t                  out;
+    ngx_atomic_uint_t            rate_overflow;
     ngx_http_waf_stat_shm_t      snap;
     ngx_http_waf_stat_shm_t     *sh;
     ngx_http_waf_loc_conf_t     *wlcf;
@@ -687,6 +702,10 @@ ngx_http_waf_status_handler(ngx_http_request_t *r)
     geo_db = wlcf->rep.geo_db;
     fmt = ngx_http_waf_status_format(&r->uri);
 
+    /* live read of the rate-limit table-saturation counter (separate zone) */
+    rate_overflow = ngx_http_waf_rate_overflow(
+        (wmcf->rate_zone != NULL) ? wmcf->rate_zone->data : NULL);
+
     size = ngx_http_waf_status_bufsize(nvhosts, cscfp);
     if (size == 0) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
@@ -704,17 +723,18 @@ ngx_http_waf_status_handler(ngx_http_request_t *r)
 
     switch (fmt) {
     case WAF_STAT_FMT_JSON:
-        p = ngx_http_waf_status_json(p, last, &snap, sh, nvhosts, cscfp, geo_db);
+        p = ngx_http_waf_status_json(p, last, &snap, sh, nvhosts, cscfp, geo_db,
+                                     rate_overflow);
         r->headers_out.content_type = waf_stat_ct_json;
         break;
     case WAF_STAT_FMT_PROMETHEUS:
         p = ngx_http_waf_status_prometheus(p, last, &snap, sh, nvhosts, cscfp,
-                                           geo_db);
+                                           geo_db, rate_overflow);
         r->headers_out.content_type = waf_stat_ct_text;
         break;
     default:
         p = ngx_http_waf_status_plain(p, last, &snap, sh, nvhosts, cscfp,
-                                      geo_db);
+                                      geo_db, rate_overflow);
         r->headers_out.content_type = waf_stat_ct_text;
         break;
     }

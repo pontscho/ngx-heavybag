@@ -115,6 +115,11 @@ typedef struct {
 
     ngx_str_t                      mail_backend_addr; /* waf_mail_backend ip  */
     ngx_str_t                      mail_backend_port; /* waf_mail_backend port*/
+
+    /* per-IP token-bucket rate limit rules (waf_rate_limit); the default
+     * rule -- if any -- is the one with a NULL geo_cc. NULL = no limiting.
+     * Element type is ngx_http_waf_rate_rule_t (see waf_rate.h). */
+    ngx_array_t                   *rate_rules;
 } ngx_http_waf_loc_conf_t;
 
 

@@ -205,6 +205,8 @@ variable, independent of `waf` / `waf_bot_block`.
 | `waf_trusted_proxy` | `<cidr>` | — | Trust `X-Forwarded-For` only from these peers when deriving the canonical client IP. |
 | `waf_blocklist` | `<cidr>` | — | Statically deny this network (→ 403). Repeatable. |
 | `waf_allowlist` | `<cidr>` | — | Allow this network, short-circuiting all reputation checks. Repeatable. |
+| `waf_rate_zone` | `size=<size>` | — | **`http` (main) only.** Declare the single process-wide per-IP rate-limit shared-memory zone (min 8 pages). One zone, keyed by client IP only, shared by every `waf_rate_limit`/`waf_stream_rate_limit` rule and by the stream + mail heads. Must be declared **before** any `waf_rate_limit`. See [Rate limiting](#rate-limiting-token-bucket). |
+| `waf_rate_limit` | `rate=Nr/s\|Nr/m\|Nr/h [burst=N] [for_geo=CC,…]` | — | Per-IP token-bucket limit; over the limit → **429**. `rate` is the steady refill, `burst` the bucket capacity (default = one period's worth). Repeatable: at most **one default** rule (no `for_geo`) plus any number of country-scoped `for_geo` overrides. Detect-mode-aware (`would_block[rate_limit]`). Requires `waf_rate_zone`. |
 | `waf_mail_auth` | *(none)* | — | Turn this `location` into the `ngx_mail` `auth_http` endpoint. |
 | `waf_mail_backend` | `<ip> <port>` | — | Upstream MTA returned as `Auth-Server`/`Auth-Port` on allow. **Numeric IP only** (the mail proxy cannot resolve hostnames). |
 | `waf_status` | *(none)* | — | `location`-only. Turn this `location` into the lock-free statistics endpoint (see [Statistics / status endpoint](#statistics--status-endpoint)). Wrap it in an access-restricted location. |
@@ -550,6 +552,7 @@ same reputation/geo semantics as the HTTP head:
 | `waf_flag_block` | `<flag> …` | Block by libloc network flag (`anycast`, `anonymous-proxy`, …). |
 | `waf_blocklist` | `<cidr>` | Statically deny this network. Repeatable. |
 | `waf_allowlist` | `<cidr>` | Allow this network, short-circuiting reputation. Repeatable. |
+| `waf_stream_rate_limit` | `rate=Nr/s\|Nr/m\|Nr/h [burst=N] [for_geo=CC,…]` | Per-IP token-bucket limit at L4; over the limit → connection dropped. Same syntax/semantics as the HTTP `waf_rate_limit`; **the backing zone is the HTTP head's `waf_rate_zone`**, so a `waf_rate_zone` must be declared in `http{}` (if absent the check fail-opens). Detect-mode-aware (`stream_would_block[rate_limit]`). |
 
 There is no UA / scanner / spoofing in the stream head — L4 has no headers or
 request line; it is pure IP reputation. A denied verdict is logged as
@@ -568,6 +571,89 @@ stream {
     }
 }
 ```
+
+### Rate limiting (token bucket)
+
+The one stateful feature: a fixed-size, **lock-free**, open-addressed per-IP
+table in a single shared zone — modelled on the per-country counter table, not
+nginx's `limit_req` (rbtree + mutex). Each slot holds a 64-bit key (FNV-1a of
+the client address) and a 64-bit packed token-bucket state, mutated only with
+bounded atomic compare-and-swap. No locks, no slab churn on the hot path.
+
+**Algorithm — token bucket (leaky-bucket / smooth rate).** Each rule has a
+steady refill `rate`, a `burst` capacity and a period. A request consumes one
+token; refill is continuous (`added = elapsed_ms × rate ÷ period`). Empty
+bucket → deny (HTTP **429**, no `Retry-After`; the L4 head drops the
+connection; the mail head answers `Auth-Status: rate limit`). A fresh slot
+starts **full** (a full burst is allowed immediately).
+
+```nginx
+http {
+    waf_rate_zone size=16m;            # ONE zone, declared before any use
+
+    server {
+        location /api/ {
+            waf_rate_limit rate=10r/s burst=20;        # default rule
+            waf_rate_limit rate=2r/s  burst=5 for_geo=CN,RU;  # stricter for CN/RU
+        }
+        location /login {
+            waf_rate_limit rate=5r/m burst=3;          # 5/min, allow a burst of 3
+        }
+    }
+}
+```
+
+**`rate` syntax:** `Nr/s`, `Nr/m`, `Nr/h` (per second / minute / hour). `burst`
+defaults to one period's worth (`N`). Internally rates are fixed-point
+(×1000) so a slow rate such as `1r/h` does **not** truncate to zero. `rate`
+and `burst` are each capped at ~4.29M so the 64-bit refill math provably never
+overflows.
+
+**`for_geo` (reputation-aware).** A rule with `for_geo=CC,…` applies only when
+the client's geo country (from `waf_geo_db`) is in the list; the first matching
+`for_geo` rule wins, otherwise the single default rule (no `for_geo`) applies.
+With no geo DB — or an IP with no geo record — only the default rule can match.
+At most one default rule per location.
+
+**One bucket per IP, shared everywhere.** There is a *single* zone keyed by the
+client IP **only** — not by location or rule. Every `waf_rate_limit` /
+`waf_stream_rate_limit` across all locations, plus the L4 and SMTP-auth heads,
+share the *same* per-IP bucket; each call merely applies its own rate/burst to
+it. This is an intentional unified per-IP budget across L4+L7, not a
+per-endpoint limit (use separate endpoints' rules to tune the rate, not to get
+separate buckets).
+
+**IPv6 is keyed on the /64 prefix** (the low 64 bits are an attacker-rotatable
+host part, so per-/128 keying would be trivially evaded). IPv4 and v4-mapped
+IPv6 share one key. Intra-/64 collateral throttling is the intended
+anti-evasion default.
+
+**Eviction-on-full, never a silent drop.** When the probe window is full the
+oldest slot is taken over rather than dropping the sample — a saturating
+attacker evicts *itself* and the limit stays live for every active IP. A lost
+eviction race fails **open** (never a false ban); the `rate_overflow` /
+`waf_rate_overflow_total` counter exposes saturation.
+
+**Fail-open contract.** A missing zone, an unsupported address family, or CAS
+starvation all return *allow* — the limiter never produces a false-positive
+ban. Stream rate limiting therefore needs `waf_rate_zone` declared in `http{}`;
+without it the L4 check silently fail-opens.
+
+**Trusted client IP.** The limit keys on the same canonical client address the
+rest of the WAF uses: the socket peer, or the `X-Forwarded-For` client **only**
+from a `waf_trusted_proxy` (HTTP), or the mail proxy's `Client-IP` **only** from
+a loopback/unix peer (SMTP-auth). A spoofed `X-Forwarded-For` from an untrusted
+peer cannot earn a fresh bucket.
+
+**Reload.** The token state lives in the shm zone and is **preserved** across a
+`nginx -s reload` (live limits are not reset). Resizing `waf_rate_zone`
+requires a full restart (nginx shm size-conflict). A binary swap needs
+stop+start (a reload does not reload module code).
+
+A rate-limit verdict surfaces as `$waf_reason=rate_limit` and is counted in
+every status format (`http_blocked_rate_limit`, `http_resp_429`,
+`stream_denied_rate_limit`, `rate_overflow`, and their `would_block` variants in
+detect mode).
 
 ### Statistics / status endpoint
 

@@ -22,6 +22,7 @@
 #include <ngx_stream.h>
 
 #include "waf_rep.h"
+#include "waf_rate.h"
 
 
 /*
@@ -36,10 +37,20 @@ extern ngx_module_t  ngx_http_waf_module;
 
 static ngx_shm_zone_t  *ngx_stream_waf_stat_zone;
 
+/*
+ * The per-IP rate-limit zone is ALSO owned by the HTTP head (declared with
+ * waf_rate_zone in http{}). The stream head resolves it by name+tag, size 0,
+ * exactly like the status zone above. NULL when http{} declared no zone -> the
+ * rate check fail-opens (NULL shm), so stream rate limiting needs the zone
+ * declared in http{}.
+ */
+static ngx_shm_zone_t  *ngx_stream_waf_rate_zone;
+
 
 typedef struct {
     ngx_uint_t          mode;       /* waf_stream off|detect|enforce|on */
     ngx_waf_rep_conf_t  rep;        /* geo / CC / flags / CIDRs */
+    ngx_array_t        *rate_rules; /* waf_stream_rate_limit token-bucket rules */
 } ngx_stream_waf_srv_conf_t;
 
 
@@ -73,6 +84,8 @@ static char *ngx_stream_waf_set_flag_block(ngx_conf_t *cf, ngx_command_t *cmd,
 static char *ngx_stream_waf_set_blocklist(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_stream_waf_set_allowlist(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_stream_waf_set_rate_limit(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 
 
@@ -134,6 +147,13 @@ static ngx_command_t  ngx_stream_waf_commands[] = {
       0,
       NULL },
 
+    { ngx_string("waf_stream_rate_limit"),
+      NGX_STREAM_MAIN_CONF|NGX_STREAM_SRV_CONF|NGX_CONF_1MORE,
+      ngx_stream_waf_set_rate_limit,
+      NGX_STREAM_SRV_CONF_OFFSET,
+      0,
+      NULL },
+
       ngx_null_command
 };
 
@@ -174,11 +194,15 @@ ngx_module_t  ngx_stream_waf_module = {
 static ngx_int_t
 ngx_stream_waf_handler(ngx_stream_session_t *s)
 {
-    void                       *sh;
+    void                       *sh, *rate_shm;
     ngx_int_t                   rc;
     ngx_str_t                   reason;
     uint16_t                    cc16;
+    ngx_uint_t                  denied;
+    struct sockaddr            *sa;
     ngx_http_waf_verdict_t      verdict;
+    ngx_http_waf_reason_e       final_reason;
+    ngx_http_waf_rate_rule_t   *rate_rule;
     ngx_stream_waf_srv_conf_t  *sscf;
 
     sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_waf_module);
@@ -187,18 +211,18 @@ ngx_stream_waf_handler(ngx_stream_session_t *s)
         return NGX_DECLINED;
     }
 
-    rc = ngx_http_waf_reputation_check(&sscf->rep, s->connection->sockaddr,
-                                       &reason, &verdict);
+    sa = s->connection->sockaddr;
+
+    rc = ngx_http_waf_reputation_check(&sscf->rep, sa, &reason, &verdict);
 
     /* resolved zone -> struct pointer (NULL until the HTTP head's init ran) */
     sh = (ngx_stream_waf_stat_zone != NULL)
          ? ngx_stream_waf_stat_zone->data : NULL;
 
     /*
-     * Detect mode: record what WOULD have been denied via the opaque
-     * would_block helper, then downgrade the verdict to allow so the
-     * connection proceeds (and is counted as allowed below). Fail-CLOSED:
-     * only WAF_MODE_DETECT observes; any other mode keeps the deny verdict.
+     * Detect mode for the reputation verdict: record what WOULD have been
+     * denied via the opaque would_block helper, then downgrade to allow so the
+     * connection proceeds. Fail-CLOSED: only WAF_MODE_DETECT observes.
      */
     if (rc != NGX_DECLINED && sscf->mode == WAF_MODE_DETECT) {
         ngx_http_waf_stat_stream_would_block(sh, verdict.reason);
@@ -207,16 +231,52 @@ ngx_stream_waf_handler(ngx_stream_session_t *s)
         rc = NGX_DECLINED;
     }
 
-    ngx_http_waf_stat_stream_bump(sh, verdict.reason, rc != NGX_DECLINED);
+    final_reason = verdict.reason;
+    denied = (rc != NGX_DECLINED);
+
+    /*
+     * Reputation allowed: apply the per-IP rate limit. The rule is selected by
+     * reputation (for_geo). Over limit -> deny (enforce) or would_block
+     * (detect). The backing zone is the HTTP head's waf_rate_zone; a NULL zone
+     * fail-opens (stream rate limiting needs waf_rate_zone declared in http{}).
+     */
+    if (!denied && sscf->rate_rules != NULL) {
+        rate_rule = ngx_http_waf_rate_rule_select(sscf->rate_rules, &verdict);
+        rate_shm = (ngx_stream_waf_rate_zone != NULL)
+                   ? ngx_stream_waf_rate_zone->data : NULL;
+
+        if (rate_rule != NULL
+            && ngx_http_waf_rate_check(rate_shm, sa, rate_rule->rate_num_fp,
+                   rate_rule->period_ms, rate_rule->burst_fp)
+               == NGX_BUSY)
+        {
+            if (sscf->mode == WAF_MODE_DETECT) {
+                ngx_http_waf_stat_stream_would_block(sh,
+                                                     WAF_REASON_RATE_LIMIT);
+                ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                              "waf: stream rate limit [detect]");
+            } else {
+                denied = 1;
+                final_reason = WAF_REASON_RATE_LIMIT;
+            }
+        }
+    }
+
+    ngx_http_waf_stat_stream_bump(sh, final_reason, denied);
 
     if (verdict.geo_valid) {
         cc16 = (uint16_t) ((verdict.country[0] << 8) | verdict.country[1]);
-        ngx_http_waf_stat_cc_bump(sh, cc16, rc != NGX_DECLINED);
+        ngx_http_waf_stat_cc_bump(sh, cc16, denied);
     }
 
-    if (rc != NGX_DECLINED) {
-        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
-                      "waf: stream reputation block (%V)", &reason);
+    if (denied) {
+        if (final_reason == WAF_REASON_RATE_LIMIT) {
+            ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                          "waf: stream rate limit exceeded");
+        } else {
+            ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+                          "waf: stream reputation block (%V)", &reason);
+        }
         return NGX_STREAM_FORBIDDEN;
     }
 
@@ -277,6 +337,9 @@ ngx_stream_waf_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
     if (conf->rep.allowlist == NULL) {
         conf->rep.allowlist = prev->rep.allowlist;
     }
+    if (conf->rate_rules == NULL) {
+        conf->rate_rules = prev->rate_rules;
+    }
 
     /* a country whitelist without a geo database can never allow anyone */
     if (conf->rep.allow_cc != NULL && conf->rep.geo_db == NULL) {
@@ -321,6 +384,21 @@ ngx_stream_waf_init(ngx_conf_t *cf)
         ngx_stream_waf_stat_zone = ngx_shared_memory_add(cf, &name, 0,
                                                        &ngx_http_waf_module);
         if (ngx_stream_waf_stat_zone == NULL) {
+            return NGX_ERROR;
+        }
+    }
+
+    /*
+     * Resolve (never create) the HTTP head's per-IP rate-limit zone, size 0,
+     * same as the status zone. Stays NULL if http{} declared no waf_rate_zone
+     * -> ngx_http_waf_rate_check fail-opens.
+     */
+    {
+        ngx_str_t  name = ngx_string("waf_rate");
+
+        ngx_stream_waf_rate_zone = ngx_shared_memory_add(cf, &name, 0,
+                                                       &ngx_http_waf_module);
+        if (ngx_stream_waf_rate_zone == NULL) {
             return NGX_ERROR;
         }
     }
@@ -479,4 +557,19 @@ ngx_stream_waf_set_allowlist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     return NGX_CONF_OK;
+}
+
+
+/*
+ * waf_stream_rate_limit rate=Nr/s|Nr/m|Nr/h [burst=N] [for_geo=CC,...]: append
+ * a per-IP token-bucket rule to this stream server. The backing store is the
+ * HTTP head's waf_rate_zone (declared in http{}); when absent the check
+ * fail-opens. Parse + bounds checks are shared via ngx_http_waf_rate_rule_add.
+ */
+static char *
+ngx_stream_waf_set_rate_limit(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_stream_waf_srv_conf_t  *sscf = conf;
+
+    return ngx_http_waf_rate_rule_add(cf, &sscf->rate_rules);
 }
