@@ -332,6 +332,74 @@ rl_after=$(getcnt last_reload)
 if [ "$after" -ge "$before" ] && [ "$after" -gt 0 ]; then ok "counters preserved across reload ($before -> $after)"; else bad "counters lost on reload ($before -> $after)"; fi
 if [ "$rl_after" -ge "$rl_before" ]; then ok "last_reload updated ($rl_before -> $rl_after)"; else bad "last_reload regressed ($rl_before -> $rl_after)"; fi
 
+echo "== geo DB signature verification (load-time, fail-closed) =="
+# A tampered / truncated location.db must make nginx -t FAIL at config parse
+# (geo_open -> verify -> NGX_CONF_ERROR). Each case uses its own minimal conf;
+# we assert BOTH a non-zero exit AND the gate-specific message on stderr, so
+# the rejection is pinned to the verify path, not an unrelated config error.
+VTMP=$(mktemp -d)
+DBSRC=$ROOT/geodb/location.db
+DBSIZE=$(stat -c%s "$DBSRC")
+
+mkconf() { # <db-path>
+    cat > "$VTMP/v.conf" <<EOF
+load_module $SBX/modules/ngx_http_waf_module.so;
+worker_processes 1;
+pid $VTMP/v.pid;
+error_log $VTMP/v-error.log info;
+events { worker_connections 64; }
+http {
+    waf_geo_db $1;
+    server { listen 127.0.0.1:28099; server_name neg.test; }
+}
+EOF
+}
+
+# (1) tampered data region: flip one byte at an offset DERIVED from the real DB
+#     size (size/2, clamped >= 4200) -- never a hard-coded offset a smaller
+#     future DB could push past EOF, turning the flip into a silent no-op. The
+#     signature blobs are zeroed pre-hash, so corrupting them would not change
+#     the digest; we must corrupt the hashed data region.
+cp "$DBSRC" "$VTMP/bad.db"
+FLIP=$(( DBSIZE / 2 )); [ "$FLIP" -lt 4200 ] && FLIP=4200
+if [ "$FLIP" -lt "$DBSIZE" ]; then
+    python3 -c "f=open('$VTMP/bad.db','r+b'); o=$FLIP; f.seek(o); b=f.read(1); f.seek(o); f.write(bytes([b[0]^0xff])); f.close()"
+    ok "verify setup: flipped data byte at $FLIP (db $DBSIZE bytes)"
+else
+    bad "verify setup: flip offset $FLIP not < db size $DBSIZE"
+fi
+mkconf "$VTMP/bad.db"
+"$NGINX" -p "$SBX/" -c "$VTMP/v.conf" -t 2>"$VTMP/out-bad.log"
+[ $? -ne 0 ] && ok "tampered DB: nginx -t fails" || bad "tampered DB: nginx -t unexpectedly OK"
+grep -q 'signature verification failed' "$VTMP/out-bad.log" \
+    && ok "tampered DB: verify-failure logged" || bad "tampered DB: verify message missing"
+
+# (2) truncated to header-only (4200 bytes): the 4192-byte header is intact but
+#     the data region is empty, so the signature (over the whole file) cannot
+#     match -> verify fails (distinct from the too-small guard below).
+head -c 4200 "$DBSRC" > "$VTMP/short.db"
+mkconf "$VTMP/short.db"
+"$NGINX" -p "$SBX/" -c "$VTMP/v.conf" -t 2>"$VTMP/out-short.log"
+[ $? -ne 0 ] && ok "header-only DB: nginx -t fails" || bad "header-only DB: nginx -t unexpectedly OK"
+grep -q 'signature verification failed' "$VTMP/out-short.log" \
+    && ok "header-only DB: verify-failure logged" || bad "header-only DB: verify message missing"
+
+# (3) truncated to 100 bytes: rejected by the pre-mmap size guard (< 4200),
+#     before mmap/verify ever runs.
+head -c 100 "$DBSRC" > "$VTMP/tiny.db"
+mkconf "$VTMP/tiny.db"
+"$NGINX" -p "$SBX/" -c "$VTMP/v.conf" -t 2>"$VTMP/out-tiny.log"
+[ $? -ne 0 ] && ok "tiny DB: nginx -t fails" || bad "tiny DB: nginx -t unexpectedly OK"
+grep -q 'too small' "$VTMP/out-tiny.log" \
+    && ok "tiny DB: too-small rejection logged" || bad "tiny DB: too-small message missing"
+
+# (4) sanity: the real DB is comfortably under the 512 MiB cap, so the cap can
+#     never become a self-inflicted fail-closed DoS on an organically growing DB.
+CAP=$(( 512 * 1024 * 1024 ))
+[ "$DBSIZE" -lt "$CAP" ] && ok "real DB ($DBSIZE) under 512 MiB cap" || bad "real DB ($DBSIZE) exceeds cap ($CAP)"
+
+rm -rf "$VTMP"
+
 echo
 echo "==================  RESULT: $pass passed, $fail failed  =================="
 [ "$fail" -eq 0 ]
