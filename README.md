@@ -4,7 +4,7 @@ A lean, fast **edge firewall** for vanilla nginx, built as a dynamic C module
 plus the stock `ngx_mail` proxy, sharing a single IP-reputation core. It is
 *not* a heavy WAF — it is a slim edge filter: scanner path blocking,
 User-Agent classification (the `$waf_type` variable), Apache fingerprint
-spoofing, libloc-based geo/reputation filtering (block- **or** allow-list),
+spoofing, embedded nanolibloc geo/reputation filtering (block- **or** allow-list),
 and HTTP + SMTP + stream (L4) protection driven by the same reputation engine.
 
 It replaces a legacy `nginx-firewall.conf` (~130 location-based scanner
@@ -52,13 +52,13 @@ dead rules) with compiled, anchored, hot-reloadable rules.
 │       ├── ngx_http_waf.h         shared HTTP types / loc_conf
 │       ├── waf_match.{c,h}         scanner regex buckets + UA classification
 │       ├── waf_spoof.{c,h}         Apache Server header + error-page spoof
-│       ├── waf_geo.{c,h}           libloc location.db mmap reader
+│       ├── waf_geo.{c,h}           IPFire location.db reader (embedded nanolibloc)
 │       ├── waf_rep.h               shared rep_conf + reputation prototypes
 │       ├── waf_reputation.{c,h}    shared reputation core + config helpers
 │       ├── waf_authhttp.{c,h}      ngx_mail auth_http content handler
 │       └── waf_stream.c            ngx_stream_waf_module (L4 reputation head)
 ├── geodb/
-│   ├── location.db              IPFire libloc database (uncompressed)
+│   ├── location.db              IPFire location database (uncompressed)
 ├── reference/                   nanolibloc.c (basis), loctest.c (geo oracle)
 ├── sandbox/                     runnable test env AND the build install prefix
 │   ├── nginx.conf               full HTTP + mail example config   (tracked)
@@ -193,11 +193,11 @@ variable, independent of `waf` / `waf_bot_block`.
 | `waf_crawler_list` | `<path>` | — | UA signatures for search-engine/archival crawlers → `$waf_type=crawler`. |
 | `waf_bot_list` | `<path>` | — | UA signatures for social/monitor/feed/HTTP-library clients → `$waf_type=bot`. |
 | `waf_server_token` | `<string>` | `Apache/2.4.68 (Unix)` | The fake `Server:` token and the error-page fingerprint. |
-| `waf_geo_db` | `<path>` | — | Path to the libloc `location.db` (mmap'd read-only). |
+| `waf_geo_db` | `<path>` | — | Path to the IPFire `location.db` (mmap'd read-only; read by the embedded nanolibloc adaptation, no libloc dependency). |
 | `waf_geo_block` | `<CC> …` | — | Block these country codes (ISO-3166 two-letter, plus IPFire specials A1/A2/A3/T1/XD) → 403. |
 | `waf_asn_block` | `<ASN> …` | — | Block these autonomous systems (decimal, 1..4294967295) when the client IP resolves to one via the geo DB → 403. `asn==0` / no record fails open. Repeatable / multi-arg. |
 | `waf_method_allow` | `<METHOD> …` | — | **Whitelist:** only the listed HTTP methods pass; every other method → 404. Standard methods (GET, HEAD, POST, PUT, DELETE, OPTIONS, PATCH, TRACE, the WebDAV verbs, …) map to nginx's method bits; non-standard names (e.g. TRACK) are matched verbatim. Wins over `waf_method_deny`. |
-| `waf_method_deny` | `<METHOD> …` | — | **Blacklist:** the listed methods → 404; everything else passes. (Note: `TRACE` is already rejected with 405 by nginx core before the WAF runs.) |
+| `waf_method_deny` | `<METHOD> …` | — | **Blacklist:** the listed methods → 404; everything else passes. (Note: nginx core may reject `TRACE` before the WAF, depending on its `allow_special_method` / `limit_except` configuration.) |
 | `waf_geo_whitelist` | `<CC> …` | — | **Allow only** these countries; every other country and any IP with no geo record → 404. Wins over `waf_geo_block`. Repeatable / multi-arg. |
 | `waf_flag_block` | `<flag> …` | — | Block by libloc network flag: `anonymous-proxy` (alias `anon`), `satellite`, `anycast`, `tor`, `drop`. |
 | `waf_trusted_proxy` | `<cidr>` | — | Trust `X-Forwarded-For` only from these peers when deriving the canonical client IP. |
@@ -359,7 +359,7 @@ lazily, and composes cleanly with `$waf_asn` / `$waf_reason` / `$waf_ja4_hash`.
 
 ### Geo / reputation
 
-The geo database is the **IPFire libloc** database. Fetch and decompress it:
+The geo database is the **IPFire location** database (`location.db` format, read by the embedded nanolibloc adaptation — no libloc library dependency). Fetch and decompress it:
 
 ```sh
 curl -fsSL -o geodb/location.db.xz \
@@ -418,11 +418,19 @@ request header (the real SMTP peer, injected by `ngx_mail` from
 `reputation_check`, and returns a header-only response:
 
 - **Allow:** `Auth-Status: OK` + `Auth-Server`/`Auth-Port` (from
-  `waf_mail_backend`). Both are mandatory or `ngx_mail` errors out.
+  `waf_mail_backend`). Both are mandatory; if `waf_mail_backend` is unset the
+  response is sent without them and a warning is logged, so `ngx_mail` rejects
+  the session.
 - **Deny:** `Auth-Status: <reason>` — `ngx_mail` prepends its SMTP error
   code, e.g. `535 5.7.0 static blocklist`.
 - **Fail-open:** missing/unparseable `Client-IP` → allow + a warning log,
   so a format error cannot break the whole mail flow.
+- **Trusted-peer gate:** the `Client-IP` header is honoured **only** when the
+  auth request itself arrives from a loopback peer (`127.0.0.0/8`, `::1`) or a
+  Unix socket. From any other peer the header is ignored and the *connection*
+  peer is judged instead, with a warning — so a wrongly-exposed endpoint cannot
+  be steered by a spoofed `Client-IP`. This is why the endpoint must stay bound
+  to `127.0.0.1`.
 
 **Critical:** the `auth_http` `location` must be on a server/location with
 `waf off`. Otherwise the HTTP `PREACCESS` handler runs against the
@@ -453,7 +461,7 @@ same reputation/geo semantics as the HTTP head:
 | Directive | Args | Purpose |
 |---|---|---|
 | `waf_stream` | `off`\|`detect`\|`enforce` (alias `on`) | Mode for the stream `ACCESS` handler. `detect` allows the connection but bumps `stream_would_block[reason]`. **Fail-closed:** unset defaults to `enforce`. |
-| `waf_geo_db` | `<path>` | libloc `location.db` for this stream head (mmap'd read-only). |
+| `waf_geo_db` | `<path>` | IPFire `location.db` for this stream head (mmap'd read-only). |
 | `waf_geo_block` | `<CC> …` | Block these countries → connection dropped. |
 | `waf_asn_block` | `<ASN> …` | Block these autonomous systems → connection dropped. |
 | `waf_geo_whitelist` | `<CC> …` | Allow only these countries (and known IPs); else dropped. Wins over `waf_geo_block`. |
@@ -633,8 +641,9 @@ check denies *before* the country decision).
 
 - **`POST_READ` phase:** resolve the canonical client IP (peer, or XFF from
   a trusted proxy) and stash it for the reputation check.
-- **`PREACCESS` phase** (cheap → expensive): IP reputation → UA classification
-  (`$waf_type`) → scanner path regex. Classification always sets `$waf_type`;
+- **`PREACCESS` phase** (cheap → expensive): IP reputation → method filter
+  (`waf_method_allow`/`waf_method_deny`) → UA classification (`$waf_type`) →
+  scanner path regex. Classification always sets `$waf_type`;
   `waf_bot_block` only *acts* on `scanner`/`empty`. The first deny finalizes
   the request. `$waf_type` is also computed lazily by the variable
   get-handler, so it is correct even when referenced under `waf off`.
@@ -653,6 +662,25 @@ check denies *before* the country decision).
 the connection peer and closes the connection on any deny — see
 [Stream (L4) protection](#stream-l4-protection).
 
+
+## Threat model & rule tuning
+
+The rule set is fitted to this edge's real attack surface, not guessed. A
+~4-year pre-WAF capture (1.65M requests) shows a pure internet-scan profile:
+PHP/CMS probing dominates (`php` 364k, `wordpress` 139k), credential/secret
+harvesting is a fast-growing second (`secret_vcs` 161k, led by `/.env` and
+`/.git/config`), followed by router/IoT RCE and appliance-CVE probes — with
+scan volume roughly **doubling year over year**. ~36% of all traffic already
+404'd at the legacy backend, and ~8% was non-HTTP protocol junk (TLS/RDP/SMB/SSH
+banners, malware beacons) rejected at nginx's request-line parser as 400 —
+*before* any WAF phase runs, so the WAF deliberately does not try to classify it.
+
+`scanners.list` is maintained by a repeatable, read-only gap-analysis loop
+against this corpus (libc tools only — no libloc). See
+[`docs/threat-model.md`](docs/threat-model.md) for the full profile: per-class
+volumes, source/UA intelligence, the protocol-junk analysis, and the A–D
+tuning/test program (gap-analysis · detect-mode FP/TP replay · real-attack
+regression fixtures · geo/ASN tuning).
 
 ## Notes & limitations
 
