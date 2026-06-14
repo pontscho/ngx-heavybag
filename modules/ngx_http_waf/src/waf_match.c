@@ -363,6 +363,59 @@ ngx_http_waf_ua_list_compile(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
 }
 
 
+ngx_int_t
+ngx_http_waf_verified_bot_compile(ngx_conf_t *cf, ngx_array_t **arr,
+    ngx_str_t *path)
+{
+    u_char      *p, *end, *ls, *le;
+    ngx_str_t    content, line;
+    ngx_uint_t   total;
+
+    /*
+     * A missing / unopenable file aborts the reload (fail-closed-to-old-config);
+     * read_file already logged the cause. Done BEFORE the zero-entry check so an
+     * absent file is never mistaken for a deliberately empty list.
+     */
+    if (ngx_http_waf_read_file(cf, path, &content) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    total = 0;
+    p = content.data;
+    end = p + content.len;
+
+    while (ngx_http_waf_next_line(&p, end, &ls, &le) == NGX_OK) {
+
+        line.data = ls;
+        line.len = le - ls;
+
+        /*
+         * ngx_http_waf_cidr_add lazily allocates *arr on the first push, so a
+         * comments-only file leaves *arr NULL and the class is skipped. A line
+         * with sloppy host bits warns but is still accepted (ngx_ptocidr returns
+         * NGX_DONE inside cidr_add); only a genuinely unparseable line returns
+         * NGX_ERROR, which we propagate to abort the reload.
+         */
+        if (ngx_http_waf_cidr_add(cf, arr, &line) != NGX_OK) {
+            return NGX_ERROR;
+        }
+        total++;
+    }
+
+    if (*arr == NULL || (*arr)->nelts == 0) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+            "waf: verified-bot list \"%V\" has no usable CIDR entries; "
+            "the class will not be verified", path);
+        return NGX_OK;
+    }
+
+    ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0,
+        "waf: loaded %ui verified-bot CIDR(s) from \"%V\"", total, path);
+
+    return NGX_OK;
+}
+
+
 void
 ngx_http_waf_ua_classify(ngx_http_request_t *r, ngx_http_waf_loc_conf_t *wlcf,
     ngx_http_waf_ctx_t *ctx)

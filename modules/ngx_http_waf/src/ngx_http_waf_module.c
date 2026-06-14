@@ -69,7 +69,8 @@ ngx_str_t  waf_reason_str[WAF_REASON_MAX] = {
     ngx_string("method"),
     ngx_string("args"),
     ngx_string("cookie"),
-    ngx_string("referer")
+    ngx_string("referer"),
+    ngx_string("fake_bot")
 };
 
 
@@ -97,6 +98,8 @@ static char *ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent,
 static char *ngx_http_waf_set_scanner_list(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_ua_list(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_http_waf_set_verified_bot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_sig_list(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
@@ -165,6 +168,13 @@ static ngx_command_t  ngx_http_waf_commands[] = {
       offsetof(ngx_http_waf_loc_conf_t, bot_block),
       NULL },
 
+    { ngx_string("waf_fake_bot_block"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_waf_loc_conf_t, fake_bot_block),
+      NULL },
+
     { ngx_string("waf_scanner_list"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_http_waf_set_scanner_list,
@@ -200,6 +210,16 @@ static ngx_command_t  ngx_http_waf_commands[] = {
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       (void *) WAF_UA_BOT },
+
+    /* verified-bot CIDR allowlist: "waf_verified_bot <class> <cidr-path>" --
+     * the class string maps to a UA enum, so one directive covers every
+     * positively verifiable class (crawler / ai_crawler) */
+    { ngx_string("waf_verified_bot"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
+      ngx_http_waf_set_verified_bot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
 
     /* request-field signature lists: one shared setter, subject in cmd->post */
     { ngx_string("waf_args_list"),
@@ -904,6 +924,36 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
         return NGX_HTTP_NOT_FOUND;
     }
 
+    /*
+     * Fake-bot: a request claiming to be a crawler whose canonical client IP is
+     * outside the published range for that class. The class guard MUST stay to
+     * the LEFT of the array index -- REGULAR/EMPTY are >= WAF_UA_LIST_MAX and
+     * would read past verified_bot_cidrs[]; a NULL slot (class unconfigured, or
+     * an empty list -- cidr_add leaves the array NULL on zero entries) is
+     * silently skipped, never treated as a block-all allowlist.
+     */
+    if (wlcf->fake_bot_block
+        && (ctx->ua == WAF_UA_CRAWLER || ctx->ua == WAF_UA_AI_CRAWLER)
+        && wlcf->verified_bot_cidrs[ctx->ua] != NULL
+        && ngx_cidr_match(sa, wlcf->verified_bot_cidrs[ctx->ua]) != NGX_OK)
+    {
+        if (ngx_http_waf_finalize_decision(r, ctx, wlcf, WAF_REASON_FAKE_BOT,
+                                           NGX_HTTP_FORBIDDEN) == NGX_DECLINED)
+        {
+            return NGX_DECLINED;   /* detect: would-block recorded, allow */
+        }
+
+        ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                      "waf: fake-bot blocked (%V claimed, IP out of range)",
+                      &waf_type_str[ctx->ua]);
+
+        if (verdict.geo_valid) {
+            ngx_http_waf_stat_cc_bump(sh, cc16, 1);
+        }
+
+        return NGX_HTTP_FORBIDDEN;
+    }
+
     rc = ngx_http_waf_scanner_lookup(wlcf->scanner_re, &r->uri);
     if (rc != NGX_DECLINED) {
         if (ngx_http_waf_finalize_decision(r, ctx, wlcf, WAF_REASON_SCANNER_PATH,
@@ -1048,6 +1098,7 @@ ngx_http_waf_create_loc_conf(ngx_conf_t *cf)
      */
     conf->mode = NGX_CONF_UNSET_UINT;
     conf->bot_block = NGX_CONF_UNSET;
+    conf->fake_bot_block = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -1071,6 +1122,7 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     /* fail-CLOSED default: an unset waf gate enforces (never silently off) */
     ngx_conf_merge_uint_value(conf->mode, prev->mode, WAF_MODE_ENFORCE);
     ngx_conf_merge_value(conf->bot_block, prev->bot_block, 0);
+    ngx_conf_merge_value(conf->fake_bot_block, prev->fake_bot_block, 0);
 
     /* inherit the compiled buckets when this level defined no list */
     for (i = 0; i < WAF_ACTION_MAX; i++) {
@@ -1096,6 +1148,14 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
             conf->sig_list[i] = prev->sig_list[i];
             ngx_memcpy(conf->sig_re[i], prev->sig_re[i],
                        sizeof(prev->sig_re[i]));
+        }
+    }
+
+    /* inherit each verified-bot CIDR list + its path sentinel when unset here */
+    for (i = 0; i < WAF_UA_LIST_MAX; i++) {
+        if (conf->verified_bot_list[i].data == NULL) {
+            conf->verified_bot_list[i] = prev->verified_bot_list[i];
+            conf->verified_bot_cidrs[i] = prev->verified_bot_cidrs[i];
         }
     }
 
@@ -1273,6 +1333,61 @@ ngx_http_waf_set_ua_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     if (ngx_http_waf_ua_list_compile(cf, wlcf, &value[1], cat) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * waf_verified_bot <class> <cidr-path>: load a published CIDR allowlist for one
+ * positively-verifiable UA class. The class token ("crawler" / "ai_crawler")
+ * maps to a UA enum, so this single TAKE2 directive serves both classes; any
+ * other class is a config error. A request claiming that class whose canonical
+ * client IP falls outside the loaded range is a fake bot, blocked in PREACCESS
+ * when waf_fake_bot_block is on. Unlike the ua/sig list setters this carries the
+ * class in an argument, not cmd->post.
+ */
+static char *
+ngx_http_waf_set_verified_bot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_waf_loc_conf_t  *wlcf = conf;
+    ngx_str_t                *value = cf->args->elts;
+    ngx_http_waf_ua_e         cat;
+
+    /*
+     * Map the class token to a UA enum. The map MUST only ever yield a value
+     * < WAF_UA_LIST_MAX so verified_bot_cidrs[cat] is provably in bounds; an
+     * unknown class is rejected, never silently ignored.
+     */
+    if (value[1].len == sizeof("crawler") - 1
+        && ngx_strncmp(value[1].data, "crawler", value[1].len) == 0)
+    {
+        cat = WAF_UA_CRAWLER;
+
+    } else if (value[1].len == sizeof("ai_crawler") - 1
+               && ngx_strncmp(value[1].data, "ai_crawler", value[1].len) == 0)
+    {
+        cat = WAF_UA_AI_CRAWLER;
+
+    } else {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "waf_verified_bot: unknown class \"%V\" "
+            "(expected \"crawler\" or \"ai_crawler\")", &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (wlcf->verified_bot_list[cat].data != NULL) {
+        return "is duplicate";
+    }
+
+    if (ngx_http_waf_verified_bot_compile(cf, &wlcf->verified_bot_cidrs[cat],
+                                          &value[2])
+        != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    wlcf->verified_bot_list[cat] = value[2];
 
     return NGX_CONF_OK;
 }
