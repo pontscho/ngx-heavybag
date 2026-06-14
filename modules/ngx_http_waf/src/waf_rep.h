@@ -57,6 +57,7 @@ typedef enum {
     WAF_REASON_ARGS,           /* query-string signature (404/403/444) */
     WAF_REASON_COOKIE,         /* Cookie signature (404/403/444)       */
     WAF_REASON_REFERER,        /* Referer signature (404/403/444)      */
+    WAF_REASON_FAKE_BOT,       /* claimed crawler outside published CIDR (403) */
     WAF_REASON_MAX
 } ngx_http_waf_reason_e;
 

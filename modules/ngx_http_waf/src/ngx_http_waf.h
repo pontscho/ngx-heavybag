@@ -86,6 +86,16 @@ typedef struct {
     /* UA classification: one compiled alternation per list-backed category */
     ngx_regex_t                   *ua_re[WAF_UA_LIST_MAX];
 
+    /* verified-bot CIDR allowlists: a claimed crawler whose canonical client
+     * IP is outside the published range for its class is a fake bot (403).
+     * Indexed by ngx_http_waf_ua_e; only the verifiable classes (crawler /
+     * ai_crawler) ever get a list. A NULL slot means the class is unconfigured
+     * and silently skipped (see the PREACCESS guard); verified_bot_list[] is the
+     * path sentinel used for the duplicate guard and inherit-on-merge. */
+    ngx_array_t                   *verified_bot_cidrs[WAF_UA_LIST_MAX];
+    ngx_str_t                      verified_bot_list[WAF_UA_LIST_MAX];
+    ngx_flag_t                     fake_bot_block; /* waf_fake_bot_block on|off */
+
     /* args/cookie/referer signatures: one action-bucketed row per subject */
     ngx_str_t        sig_list[WAF_SIG_LIST_MAX];   /* dup-guard / merge sentinel */
     ngx_regex_t     *sig_re[WAF_SIG_LIST_MAX][WAF_ACTION_MAX];

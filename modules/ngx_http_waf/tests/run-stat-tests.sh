@@ -173,6 +173,45 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$D/sig-detect?q=%27union
 [ "$code" = 200 ] && ok "detect: args signature passes (200)" || bad "detect args code=$code"
 a=$(getcnt http_would_block_args); assert_delta http_would_block_args "$b" "$a" 1
 
+echo "== fake-bot (CIDR-verified crawler) =="
+# "Googlebot" classifies as crawler; the canonical client IP is the loopback
+# peer (no waf_trusted_proxy -> XFF ignored). The published range excludes
+# loopback, so the claimed crawler is a fake bot unless its location's list
+# includes 127.0.0.1.
+CRAWLER='Googlebot/2.1 (+http://www.google.com/bot.html)'
+
+# (b) crawler UA, loopback OUT of published range -> 403 + http_blocked_fake_bot++
+b=$(getcnt http_blocked_fake_bot)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$CRAWLER" "$A/fakebot")
+[ "$code" = 403 ] && ok "fake-bot out-of-range returns 403" || bad "fake-bot code=$code"
+a=$(getcnt http_blocked_fake_bot); assert_delta http_blocked_fake_bot "$b" "$a" 1
+
+# (a) crawler UA, loopback IN range -> verified, served (200), no block bump
+b=$(getcnt http_blocked_fake_bot)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$CRAWLER" "$A/fakebot-ok")
+[ "$code" = 200 ] && ok "fake-bot in-range passes (200)" || bad "fake-bot in-range code=$code"
+a=$(getcnt http_blocked_fake_bot); assert_delta http_blocked_fake_bot "$b" "$a" 0
+
+# (c) switch on but class unconfigured -> skipped (200)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$CRAWLER" "$A/fakebot-skip")
+[ "$code" = 200 ] && ok "fake-bot unconfigured class skipped (200)" || bad "fake-bot skip code=$code"
+
+# (d) list present but switch off -> not enforced (200)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$CRAWLER" "$A/fakebot-off")
+[ "$code" = 200 ] && ok "fake-bot block off passes (200)" || bad "fake-bot off code=$code"
+
+# (e) detect mode -> 200 (passed through) + http_would_block_fake_bot++
+b=$(getcnt http_would_block_fake_bot)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$CRAWLER" "$D/fakebot-detect")
+[ "$code" = 200 ] && ok "detect: fake-bot passes (200)" || bad "detect fake-bot code=$code"
+a=$(getcnt http_would_block_fake_bot); assert_delta http_would_block_fake_bot "$b" "$a" 1
+
+# $waf_reason renders the fake_bot token in the access log
+curl -s -o /dev/null -A "$CRAWLER" "$A/fakebot"
+sleep 1
+tail -20 "$SBX/logs/access-stat.log" | grep -q 'reason=fake_bot' \
+    && ok "\$waf_reason=fake_bot in access log" || bad "\$waf_reason fake_bot missing in log"
+
 echo "== JA4 fingerprint (TCP-TLS) =="
 # the client_hello wrapper computes JA4 at handshake; $waf_ja4_hash surfaces it
 ja4=$(curl -sk -o /dev/null -D - "https://127.0.0.1:28443/ja4" \
@@ -263,6 +302,16 @@ curl -s "$STAT/json" | jq -e '.http.blocked.referer' >/dev/null 2>&1 && ok "json
 curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="args"}'    && ok "prom: blocked args"    || bad "prom missing blocked args"
 curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="cookie"}'  && ok "prom: blocked cookie"  || bad "prom missing blocked cookie"
 curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="referer"}' && ok "prom: blocked referer" || bad "prom missing blocked referer"
+
+echo "== fake_bot reason exposed in all 3 formats (auto-extend, no truncation) =="
+curl -s "$STAT/plain" | grep -q '^http_blocked_fake_bot '     && ok "plain: http_blocked_fake_bot"     || bad "plain missing http_blocked_fake_bot"
+curl -s "$STAT/plain" | grep -q '^http_would_block_fake_bot ' && ok "plain: http_would_block_fake_bot" || bad "plain missing http_would_block_fake_bot"
+curl -s "$STAT/json" | jq -e '.http.blocked.fake_bot'     >/dev/null 2>&1 && ok "json: http.blocked.fake_bot"     || bad "json missing http.blocked.fake_bot"
+curl -s "$STAT/json" | jq -e '.http.would_block.fake_bot' >/dev/null 2>&1 && ok "json: http.would_block.fake_bot" || bad "json missing http.would_block.fake_bot"
+curl -s "$STAT/prometheus" | grep -q 'waf_http_blocked_total{reason="fake_bot"}'     && ok "prom: blocked fake_bot"     || bad "prom missing blocked fake_bot"
+curl -s "$STAT/prometheus" | grep -q 'waf_http_would_block_total{reason="fake_bot"}' && ok "prom: would_block fake_bot" || bad "prom missing would_block fake_bot"
+# truncation guard: the extra reason must not push the body past WAF_STAT_FIXED_LINES
+curl -s "$STAT/json" | jq -e . >/dev/null 2>&1 && ok "json still parses with fake_bot (no truncation)" || bad "json truncated/broken by fake_bot"
 
 echo "== SMTP-auth (reputation_check out==NULL) =="
 # blocked Client-IP (10/8) -> Auth-Status carries the deny reason, no crash

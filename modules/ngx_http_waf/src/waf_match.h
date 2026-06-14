@@ -46,6 +46,24 @@ ngx_int_t ngx_http_waf_ua_list_compile(ngx_conf_t *cf,
     ngx_http_waf_loc_conf_t *wlcf, ngx_str_t *path, ngx_http_waf_ua_e cat);
 
 /*
+ * Read the verified-bot CIDR allowlist referenced by *path into *arr (a lazily
+ * created ngx_cidr_t array; the signature is peer to ngx_http_waf_cidr_add, not
+ * ua_list_compile). Each non-comment, non-blank line is one "addr/prefix" CIDR;
+ * turning a published range (e.g. Google's googlebot.json) into this plain list
+ * is the offline cron's job, not the WAF's. A missing/unreadable file is fatal
+ * (NGX_ERROR -> reload aborts, old config stays live); a genuinely unparseable
+ * CIDR line is fatal too. A file that exists but yields zero usable entries
+ * leaves *arr NULL (the class stays unconfigured -> silently skipped) and only
+ * warns. Runs at configuration time (directive setter); reload-safe via cf->pool.
+ *
+ * The lazy allocation is load-bearing: zero entries MUST leave *arr NULL (never
+ * an allocated zero-element array), so the PREACCESS "!= NULL" guard can never
+ * be fooled into treating an empty list as a block-all allowlist.
+ */
+ngx_int_t ngx_http_waf_verified_bot_compile(ngx_conf_t *cf, ngx_array_t **arr,
+    ngx_str_t *path);
+
+/*
  * Classify the request's User-Agent into ctx->ua and set ctx->classified.
  * Missing/empty UA -> WAF_UA_EMPTY; otherwise the first matching ua_re[]
  * bucket in priority order (SCANNER..BOT); no match -> WAF_UA_REGULAR.
