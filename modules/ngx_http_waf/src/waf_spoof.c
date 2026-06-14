@@ -99,6 +99,7 @@ ngx_http_waf_build_error_page(ngx_http_request_t *r, ngx_str_t *token,
     in_port_t    port;
     ngx_str_t    host, *reason, *detail;
     ngx_uint_t   status;
+    uintptr_t    escape;
 
     status = r->headers_out.status;
 
@@ -108,6 +109,24 @@ ngx_http_waf_build_error_page(ngx_http_request_t *r, ngx_str_t *token,
         host = r->headers_in.server;
     } else {
         ngx_str_set(&host, "localhost");
+    }
+
+    /*
+     * The Host is reflected into the error HTML. nginx core already rejects
+     * markup metacharacters in Host (ngx_http_validate_host), but escape here
+     * too so this page never depends on a non-local invariant for its safety.
+     */
+    escape = ngx_escape_html(NULL, host.data, host.len);
+    if (escape) {
+        u_char  *eh = ngx_pnalloc(r->pool, host.len + escape);
+
+        if (eh == NULL) {
+            return NGX_ERROR;
+        }
+
+        ngx_escape_html(eh, host.data, host.len);
+        host.data = eh;
+        host.len += escape;
     }
 
     port = 80;
