@@ -102,6 +102,12 @@ typedef struct {
 
     ngx_str_t                      server_token; /* waf_server_token      */
 
+    /* waf_reason_header on|off: stamp X-WAF-Reason: <verdict> on every response.
+     * OFF by default -- production must never disclose which rule matched; the
+     * replay/test harness turns it on to read the per-request verdict on the
+     * wire (test/observability only). */
+    ngx_flag_t                     reason_header;
+
     ngx_waf_rep_conf_t             rep;          /* geo / CC / flags / CIDRs */
     ngx_array_t                   *trusted_proxy;/* ngx_cidr_t for XFF (HTTP) */
 

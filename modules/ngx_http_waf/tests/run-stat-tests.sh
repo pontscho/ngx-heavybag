@@ -173,6 +173,15 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" "$D/sig-detect?q=%27union
 [ "$code" = 200 ] && ok "detect: args signature passes (200)" || bad "detect args code=$code"
 a=$(getcnt http_would_block_args); assert_delta http_would_block_args "$b" "$a" 1
 
+# X-WAF-Reason header (waf_reason_header on; detect vhost): the per-request
+# verdict token is exposed on the response. A default-off vhost never emits it.
+rh=$(curl -s -o /dev/null -D - -A "$UA" "$D/sig-detect?q=%27union" | awk 'tolower($1)=="x-waf-reason:"{print $2}' | tr -d '\r')
+[ "$rh" = args ] && ok "reason-header: args token on detect response" || bad "reason-header: want args got '$rh'"
+rh=$(curl -s -o /dev/null -D - -A "$UA" "$D/index.html" | awk 'tolower($1)=="x-waf-reason:"{print $2}' | tr -d '\r')
+[ "$rh" = none ] && ok "reason-header: none token on clean detect response" || bad "reason-header: want none got '$rh'"
+rh=$(curl -s -o /dev/null -D - -A "$UA" "$A/index.html" | grep -ci x-waf-reason)
+[ "$rh" = 0 ] && ok "reason-header: absent when directive unset (default off)" || bad "reason-header: leaked on default-off vhost"
+
 echo "== fake-bot (CIDR-verified crawler) =="
 # "Googlebot" classifies as crawler; the canonical client IP is the loopback
 # peer (no waf_trusted_proxy -> XFF ignored). The published range excludes

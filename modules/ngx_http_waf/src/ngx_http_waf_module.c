@@ -32,6 +32,10 @@
  * Allocated once in postconfiguration; -1 until then -> $waf_ja4_hash unset.
  */
 static int  ngx_http_waf_ja4_ssl_index = -1;
+
+/* saved next-in-chain for the opt-in X-WAF-Reason header filter; installed in
+ * postconfiguration (see ngx_http_waf_reason_header_filter). */
+static ngx_http_output_header_filter_pt  ngx_http_waf_next_reason_filter;
 #endif
 
 
@@ -137,6 +141,7 @@ static char *ngx_http_waf_set_rate_limit(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_int_t ngx_http_waf_preconfiguration(ngx_conf_t *cf);
 static ngx_int_t ngx_http_waf_postconfiguration(ngx_conf_t *cf);
+static ngx_int_t ngx_http_waf_reason_header_filter(ngx_http_request_t *r);
 static void *ngx_http_waf_create_main_conf(ngx_conf_t *cf);
 static char *ngx_http_waf_init_main_conf(ngx_conf_t *cf, void *conf);
 static void *ngx_http_waf_create_srv_conf(ngx_conf_t *cf);
@@ -254,6 +259,15 @@ static ngx_command_t  ngx_http_waf_commands[] = {
       ngx_conf_set_str_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_waf_loc_conf_t, server_token),
+      NULL },
+
+    /* X-WAF-Reason debug header: OFF by default (no verdict disclosure in
+     * production); the replay/test harness turns it on. */
+    { ngx_string("waf_reason_header"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_waf_loc_conf_t, reason_header),
       NULL },
 
     { ngx_string("waf_geo_db"),
@@ -1160,6 +1174,7 @@ ngx_http_waf_create_loc_conf(ngx_conf_t *cf)
     conf->mode = NGX_CONF_UNSET_UINT;
     conf->bot_block = NGX_CONF_UNSET;
     conf->fake_bot_block = NGX_CONF_UNSET;
+    conf->reason_header = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -1184,6 +1199,7 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_uint_value(conf->mode, prev->mode, WAF_MODE_ENFORCE);
     ngx_conf_merge_value(conf->bot_block, prev->bot_block, 0);
     ngx_conf_merge_value(conf->fake_bot_block, prev->fake_bot_block, 0);
+    ngx_conf_merge_value(conf->reason_header, prev->reason_header, 0);
 
     /* inherit the compiled buckets when this level defined no list */
     for (i = 0; i < WAF_ACTION_MAX; i++) {
@@ -2480,6 +2496,11 @@ ngx_http_waf_postconfiguration(ngx_conf_t *cf)
         return NGX_ERROR;
     }
 
+    /* opt-in X-WAF-Reason header filter (waf_reason_header on); prepends onto
+     * the chain above so each filter keeps its own saved next pointer. */
+    ngx_http_waf_next_reason_filter = ngx_http_top_header_filter;
+    ngx_http_top_header_filter = ngx_http_waf_reason_header_filter;
+
     /* assign each server{} a per-vhost counter slot (this sizes the zone) */
     if (ngx_http_waf_stat_assign_vhosts(cf) != NGX_OK) {
         return NGX_ERROR;
@@ -2499,4 +2520,43 @@ ngx_http_waf_postconfiguration(ngx_conf_t *cf)
 #endif
 
     return NGX_OK;
+}
+
+
+/*
+ * X-WAF-Reason header filter: when waf_reason_header is on for the location,
+ * stamp the request's WAF verdict token onto the MAIN response (subrequests
+ * pass through). OFF by default -- production must never disclose which rule
+ * matched; the replay/test harness turns it on to read each request's verdict
+ * on the wire. ctx may be absent (waf off, or no verdict resolved), in which
+ * case ctx->reason is zero -> "none".
+ */
+static ngx_int_t
+ngx_http_waf_reason_header_filter(ngx_http_request_t *r)
+{
+    ngx_table_elt_t          *h;
+    ngx_http_waf_ctx_t       *ctx;
+    ngx_http_waf_loc_conf_t  *wlcf;
+    ngx_http_waf_reason_e     reason;
+
+    wlcf = ngx_http_get_module_loc_conf(r, ngx_http_waf_module);
+
+    if (!wlcf->reason_header || r != r->main) {
+        return ngx_http_waf_next_reason_filter(r);
+    }
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_waf_module);
+    reason = (ctx != NULL) ? ctx->reason : WAF_REASON_NONE;
+
+    h = ngx_list_push(&r->headers_out.headers);
+    if (h == NULL) {
+        return NGX_ERROR;
+    }
+
+    h->hash = 1;
+    h->next = NULL;
+    ngx_str_set(&h->key, "X-WAF-Reason");
+    h->value = waf_reason_str[reason];
+
+    return ngx_http_waf_next_reason_filter(r);
 }
