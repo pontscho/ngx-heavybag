@@ -47,6 +47,17 @@
 #   --referer-vectors  also emit replay-referer-vectors.jsonl: distinct RAW
 #                      Referer strings on attack-shaped requests, with volume.
 #                      IP-free.
+#   --ip-volume        also emit replay-ip-volume.jsonl (work-stream D feed):
+#                      one line per source IP with total / hostile / junk
+#                      counts and an attack-class histogram. hostile = kept
+#                      (non-baseline) path requests; junk = §4 malformed lines
+#                      (counted per IP before the drop); total = well-formed,
+#                      non-internal requests. IP-BEARING -> gitignored, never
+#                      committed. Default path replay-ip-volume.jsonl in
+#                      --outdir, overridable with --ip-out.
+#   --ip-out FILE      explicit path for the --ip-volume feed (lets a runner
+#                      send the standard feeds to a scratch --outdir while the
+#                      IP feed lands at a fixed, gitignored corpus path).
 #
 use strict;
 use warnings;
@@ -62,6 +73,8 @@ my %opt = (
     collapse_ua     => 0,
     ua_vectors      => 0,
     referer_vectors => 0,
+    ip_volume       => 0,
+    ip_out          => undef,
 );
 my @pos;
 while (@ARGV) {
@@ -72,6 +85,8 @@ while (@ARGV) {
     elsif ($a eq '--collapse-ua')  { $opt{collapse_ua}  = 1; }
     elsif ($a eq '--ua-vectors')      { $opt{ua_vectors}      = 1; }
     elsif ($a eq '--referer-vectors') { $opt{referer_vectors} = 1; }
+    elsif ($a eq '--ip-volume')       { $opt{ip_volume}       = 1; }
+    elsif ($a eq '--ip-out')          { $opt{ip_out}          = shift @ARGV; }
     elsif ($a eq '-h' || $a eq '--help') { usage(); exit 0; }
     elsif ($a =~ /^-/)             { die "unknown option: $a\n"; }
     else                          { push @pos, $a; }
@@ -82,7 +97,8 @@ die usage() unless defined $opt{in};
 sub usage {
     return "usage: perl extract-replay-vectors.pl --in <access.log> "
          . "[--outdir DIR] [--collapse-ua] [--top-excluded N] "
-         . "[--ua-vectors] [--referer-vectors]\n";
+         . "[--ua-vectors] [--referer-vectors] "
+         . "[--ip-volume [--ip-out FILE]]\n";
 }
 
 # --------------------------------------------------------------------------
@@ -197,6 +213,7 @@ my %EXCL;       # decoded_path => volume   (baseline-excluded, for the sanity ga
 my %path_class; # decoded_path => classes_csv | "\x01BASE"   (label cache)
 my %UA_VOL;      # raw User-Agent => volume  (--ua-vectors header fixture feed)
 my %REFERER_VOL; # raw Referer    => volume  (--referer-vectors header fixture feed)
+my %IPV;         # remote_addr => {total,hostile,junk, cls=>{class=>count}} (D)
 
 while (my $line = <$IN>) {
     $lines++;
@@ -219,7 +236,17 @@ while (my $line = <$IN>) {
 
     # (3) request-line grammar METHOD SP URI SP HTTP/x.y  (§4 junk -> drop).
     my ($method, $uri) = $request =~ m{^([A-Z]{1,12}) (\S+) HTTP/\d\.\d$};
-    unless (defined $method) { $malformed++; next; }
+    unless (defined $method) {
+        $malformed++;
+        # (D) §4 protocol-junk is a per-IP signal (mass TLS/port-scan), counted
+        #     before the drop -- a SEPARATE column from path-attack hostility.
+        $IPV{$addr}{junk}++ if $opt{ip_volume};
+        next;
+    }
+
+    # (D) total = well-formed, non-internal requests from this IP (baseline
+    #     included; hostile is the non-baseline subset, bumped below).
+    $IPV{$addr}{total}++ if $opt{ip_volume};
 
     # first-seen status = first 3-digit run of ' status bytes '.
     my ($status) = $mid =~ /(\d{3})/;
@@ -250,6 +277,14 @@ while (my $line = <$IN>) {
             $cached = $is_base ? "\x01BASE" : 'uncatalogued';
         }
         $path_class{$dp} = $cached;
+    }
+
+    # (D) hostile = kept (non-baseline) path request. Accumulate per IP with an
+    #     attack-class histogram ($cached is a CSV of §3 classes, or the literal
+    #     'uncatalogued'); baseline is excluded from hostility ranking.
+    if ($opt{ip_volume} && $cached ne "\x01BASE") {
+        $IPV{$addr}{hostile}++;
+        $IPV{$addr}{cls}{$_}++ for split /,/, $cached;
     }
 
     # (5) drop legit baseline (no attack class AND legit-shaped path).
@@ -381,6 +416,39 @@ if ($opt{referer_vectors}) {
     }
     close $R;
     printf "wrote: %s (%d distinct referer)\n", $p, scalar(keys %REFERER_VOL);
+}
+
+# --------------------------------------------------------------------------
+# per-IP volume feed (work-stream D): join target for honeypot-d-report.pl.
+# One line per source IP, sorted hostile desc. IP-BEARING -> gitignored.
+#   {"ip":"...","total":N,"hostile":N,"junk":N,"classes":{"php":N,...}}
+# --------------------------------------------------------------------------
+if ($opt{ip_volume}) {
+    my $p = $opt{ip_out} // "$opt{outdir}/replay-ip-volume.jsonl";
+    open my $P, '>', $p or die "cannot write $p: $!\n";
+    binmode $P;
+    my @ipk = sort {
+           ($IPV{$b}{hostile} // 0) <=> ($IPV{$a}{hostile} // 0)
+        or ($IPV{$b}{total}   // 0) <=> ($IPV{$a}{total}   // 0)
+        or $a cmp $b
+    } keys %IPV;
+    for my $ip (@ipk) {
+        my $r   = $IPV{$ip};
+        my $cls = $r->{cls} || {};
+        my @ck  = sort {
+               ($CLASS_RANK{$a} // 99) <=> ($CLASS_RANK{$b} // 99) or $a cmp $b
+        } keys %$cls;
+        my $cjson = '{' . join(',', map { jstr($_) . ':' . $cls->{$_} } @ck) . '}';
+        print $P '{'
+            . '"ip":'       . jstr($ip)
+            . ',"total":'   . ($r->{total}   // 0)
+            . ',"hostile":' . ($r->{hostile} // 0)
+            . ',"junk":'    . ($r->{junk}    // 0)
+            . ',"classes":' . $cjson
+            . "}\n";
+    }
+    close $P;
+    printf "wrote: %s (%d distinct IP)\n", $p, scalar(keys %IPV);
 }
 
 # compact machine-readable echo for the runner.
