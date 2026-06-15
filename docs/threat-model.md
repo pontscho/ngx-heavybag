@@ -195,8 +195,8 @@ geo/ASN tuning in §6 (D).
 ## 6. Methodology — data-driven rule tuning
 
 The rule set is maintained as a **repeatable gap-analysis loop** against this
-corpus, not by intuition. The four work-streams (A–D): **A, B, and C are done** (B is detailed in
-`docs/honeypot-B-plan.md`); D is planned.
+corpus, not by intuition. The four work-streams (A–D) are **all done** (B is detailed in
+`docs/honeypot-B-plan.md`).
 
 ### A — Gap-analysis → `scanners.list` growth (DONE)
 
@@ -311,19 +311,75 @@ gap-loop iterations — a fixture re-freeze is mandatory whenever a list edit
 intentionally changes coverage or an action bucket.) It complements the existing 6 unit +
 131 integration tests with **live-fire** samples.
 
-### D — ASN / geo tuning from attacker IPs (planned)
+### D — ASN / geo tuning from attacker IPs (DONE)
 
-Feed the top external sources (§5.1, **excluding** `10.0.0.0/24`) through the
-module's **own** geo reader — the embedded nanolibloc adaptation in
-`waf_geo.c`, or the standalone `reference/loctest.c` oracle — to resolve
-CC + ASN (**never libloc / the `location` CLI**; Decisions, no-libloc). Then:
+Where A/B/C tune **what** to block (paths, UAs, signatures), D tunes **whom** to
+block at the IP/network layer. It is **pure analysis → candidates**: it produces
+a report + paste-ready directive fragments for the partner to review and apply
+by hand. It writes no module `.c`, changes no list the WAF loads, and feeds only
+runtime levers that already exist (`waf_blocklist` / `waf_asn_block` /
+`waf_geo_block` / `waf_flag_block`).
+
+The procedure (reproducible, read-only on the log, libc + core-perl only —
+**never libloc / the `location` CLI**):
+
+1. **Resolve** (`reference/geolookup.c`): a standalone, libc-only IP →
+   CC / ASN / flags reader, a faithful port of the **bounds-guarded** walk /
+   lookup in `modules/ngx_http_waf/src/waf_geo.c` (NOT `loctest.c`, which carries
+   the pre-fix geo-OOB bug — no `net*12+12 ≤ len[ND]` guard, and a `nxt*=12` that
+   can wrap before its bounds check). Both `size_t` guards are preserved; the
+   libloc signature verify is skipped (offline, locally-trusted DB → no
+   `-lcrypto`). Built manually like `loctest.c`/`locverify.c`, **not** in the
+   module build: `cc -O2 -Wall -Wextra -o /tmp/geolookup reference/geolookup.c`.
+2. **Per-IP volume** (`extract-replay-vectors.pl --ip-volume`): one pass over the
+   corpus emits `replay-ip-volume.jsonl` — per source IP a `total` / `hostile` /
+   `junk` triple + an attack-class histogram, reusing the same §3 label-first
+   classification, baseline, and §4 malformed detection as the path extractor.
+   **hostile** = kept non-baseline path requests (§3 classes + uncatalogued);
+   **junk** = §4 protocol-junk (mass TLS/port-scan signal, a *separate* column);
+   the internal `10.0.0.0/24` and the legit baseline are excluded from
+   hostility ranking. Raw + hostile are shown side by side so a coarse lever's
+   collateral on legitimate traffic stays visible (partner decision).
+3. **Join + rank** (`honeypot-d-report.pl`): pipes the distinct IPs through
+   `geolookup`, then aggregates hostile / total / junk + distinct-IP counts by
+   **/24** (v4) / **/64** (v6), **ASN**, **country**, and **network flag**,
+   applies the thresholds below, and writes `honeypot-d-report.md` — evidence
+   tables (prefix | total | hostile | junk | IPs | CC | ASN | flags) plus a
+   **paste-ready** directive block (surgical levers live, coarse/advisory levers
+   commented).
+
+`tests/run-honeypot-d.sh` wires it end-to-end (build → extract → report). The
+per-IP feed and the report are **IP-bearing → gitignored** (Decision #75); the
+committed corpus feeds are untouched (the extractor's standard outputs go to a
+throwaway scratch dir, the IP feed to a fixed corpus path via `--ip-out`).
+
+The levers, by surgical precision:
 
 - Persistent hostile /24s (`185.177.72`, `78.153.140`, ...) → `waf_blocklist`
-  candidates (prefix block is the most precise lever here).
-- Dominant attacker ASNs → `waf_asn_block` candidates.
-- Dominant attacker countries → `waf_geo_block` candidates (coarse — country
-  block also drops legitimate traffic from that country, so prefer prefix/ASN
-  for surgical cases).
+  candidates (single CIDR → 403; the most precise lever, applied live).
+- Dominant attacker ASNs → `waf_asn_block` candidates (`asn==0` / no record
+  **fails open** — shown for context, never emitted as a candidate).
+- Dominant attacker countries → `waf_geo_block` (coarse — also drops legitimate
+  traffic from that country; emitted **commented**, advisory only).
+- A dominant network flag (anonymous-proxy / satellite / anycast / drop) →
+  `waf_flag_block` (advisory; emitted **commented** when a flag covers a large
+  share of hostile volume). `tor` is the special T1 country code, not a flag
+  bit, so it surfaces in the country table.
+
+**Proposed default thresholds** (all CLI-tunable; the partner tunes at run time):
+
+| lever | rule |
+|---|---|
+| `/24` blocklist | top 40 by hostile, floor `hostile ≥ 500`; distinct-IP count shown |
+| ASN block | top 30 by hostile; CC + distinct-`/24` count shown; `asn==0` excluded from candidates |
+| country | top 20 by hostile; emitted **commented** (coarse) |
+| flag | candidate when a flag covers `≥ 20%` of hostile volume; emitted **commented** |
+
+> **Scope.** D produces candidates only — it applies nothing. The blocklist /
+> ASN / geo / flag directives are `remote_addr`-dependent, so they are **not**
+> covered by the C regression fixture (loopback, `remote_addr`-independent) and
+> require no C re-freeze; the partner applies the reviewed candidates to the prod
+> conf out of band.
 
 ---
 
