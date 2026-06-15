@@ -111,8 +111,9 @@ does not name yet (candidates for new `scanners.list` entries):
 | 2,129 | `/hello.world` | scanner liveness ping |
 | 1,480 | `/_profiler/phpinfo` | Symfony debug-profiler probe |
 
-(`/_profiler` is already partly covered; the nmap `Trinity` fingerprint, DoH,
-and `/hello.world` liveness pings are open candidates — see §6 gap-analysis.)
+(`/_profiler`, DoH `/dns-query`, the nmap `Trinity` fingerprint, and the
+`/hello.world` liveness ping are now all covered — added in the 2026-06-15
+gap-loop, see §6 A.)
 
 ---
 
@@ -194,8 +195,8 @@ geo/ASN tuning in §6 (D).
 ## 6. Methodology — data-driven rule tuning
 
 The rule set is maintained as a **repeatable gap-analysis loop** against this
-corpus, not by intuition. The four work-streams (A–D): **A and C are done**; B
-is tracked in `docs/honeypot-B-plan.md`, D is planned.
+corpus, not by intuition. The four work-streams (A–D): **A, B, and C are done** (B is detailed in
+`docs/honeypot-B-plan.md`); D is planned.
 
 ### A — Gap-analysis → `scanners.list` growth (DONE)
 
@@ -212,15 +213,35 @@ The procedure (reproducible, read-only, libc tools only — **no libloc**):
 
 This loop already raised path coverage from **18.1% → 24.8%** (+~110k requests)
 in commit `d2b557a`, adding nested-dotfile, anywhere-`phpunit`, `/_profiler`,
-`/SDK/webLanguage`, and `/wordpress` patterns. §3.1 lists the next candidates
-(nmap `Trinity`, `/dns-query`, `/hello.world`).
+`/SDK/webLanguage`, and `/wordpress` patterns.
+
+The **2026-06-15 iteration** closed the largest remaining gaps surfaced by the
+B replay (validated FP-clean by the B detect gate before enforcing):
+
+| class | before | after | driver |
+|---|---:|---:|---|
+| php | 41.6% | **99.2%** | generic `\.php(/\|$)` catch-all (this edge serves no PHP; +~127k probe paths) |
+| wordpress | 89.0% | **99.5%** | `wlwmanifest.xml` (nested `*/wp-includes/...`) |
+| phpadmin | 15.0% | **98.5%** | subsumed by the generic `.php` rule |
+
+Also added: nmap `Trinity` fingerprint, `/hello.world` liveness ping (and its
+`php://input` RCE variant), Fortinet `/remote/login`, Cisco `/+cscoe+/`, the
+shellshock `/bin/sh` traversal tail, and a `php://input` **args** signature
+(444), plus a credential / config / infra-API leak cluster (`aws/credentials`,
+`secrets.json`, `appsettings.json`, `*.env`, Docker `/containers/json`, Apache
+`/server-status`, Druid) that lifted the `uncatalogued` class 14.1% → 21.6%.
+**Action note:** the generic `.php` rule lands in the 404 bucket, and the
+lookup checks 404 before 403/444 (`waf_match.c` `scanner_lookup`), so ~46
+phpmyadmin/pma paths that end in `.php` now return **404 instead of 403** — they
+stay blocked, just blended into the backdrop 404s (the §2 "hide the fingerprint"
+goal). The phpmyadmin/pma *directory* probes keep their 403.
 
 > **Coverage caveat.** "24.8% of requests" is not "24.8% of attacks" — the
 > denominator includes the ~36% legitimate noise (`/`, `app.css`, `app.json`).
 > Coverage of the *hostile* subset is far higher; treat the headline % as a
 > trend signal, not an absolute.
 
-### B — Detect-mode FP/TP replay (planned)
+### B — Detect-mode FP/TP replay (done)
 
 Validate a policy *before* enforcing it. Replay the corpus against the sandbox
 WAF in `waf detect;` mode and read the `would_block[reason]` counters:
@@ -264,9 +285,11 @@ no `waf_trusted_proxy`, no rate/geo — the only verdict is the matcher under
 test. `replay-client.pl` gained an `--enforce` mode (a fresh `Connection: close`
 socket per request, so a byte-0 EOF is an unambiguous 444).
 
-Current frozen fixture: **21,263** path/args vectors + **160** header vectors
-(`expected_status` ∈ {404: 21,192, 403: 192, 444: 39}); the enforce replay runs
-in ~20 s and asserts 100% frozen-match. It complements the existing 6 unit +
+Current frozen fixture: **38,905** path/args vectors + **160** header vectors
+(`expected_status` ∈ {404: 38,864, 403: 146, 444: 55}); the enforce replay runs
+in ~25 s and asserts 100% frozen-match. (Re-frozen 2026-06-15 after the §6 A
+gap-loop list growth — a fixture re-freeze is mandatory whenever a list edit
+intentionally changes coverage or an action bucket.) It complements the existing 6 unit +
 131 integration tests with **live-fire** samples.
 
 ### D — ASN / geo tuning from attacker IPs (planned)

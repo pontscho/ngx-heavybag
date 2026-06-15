@@ -18,6 +18,7 @@
 ^/wp-
 ^/xmlrpc\.php$
 ^/wordpress
+(^|/)wlwmanifest\.xml$
 
 # ---- VCS / secrets / dotfiles ---------------------------------------------
 (^|/)\.git
@@ -49,6 +50,12 @@ phpunit/.{0,40}eval-stdin\.php
 ^/_ignition/execute-solution$
 ^/telescope/requests$
 ^/_profiler
+# Generic .php catch-all. This edge serves no PHP app (every .php 404'd in the
+# corpus; the legit baseline has zero .php), so a blanket extension rule has no
+# false-positive surface here -- validated by the work-stream B detect FP gate.
+# Raises php-class path coverage 41.6%->~95% (+~127k random-named webshell /
+# probe paths). Matches path-info too (/app_dev.php/_profiler/...).
+^/.*\.php(/|$)
 
 # ---- mail / exchange / OWA -------------------------------------------------
 ^/owa
@@ -59,6 +66,9 @@ phpunit/.{0,40}eval-stdin\.php
 
 # ---- appliances / RCE-prone endpoints -------------------------------------
 ^/remote/fgt_lang
+^/remote/login
+^/\+cscoe\+/
+^/bin/sh$
 ^/api/v2/cmdb/system/admin/admin
 ^/HNAP1
 ^/SDK/webLanguage
@@ -75,6 +85,17 @@ phpunit/.{0,40}eval-stdin\.php
 ^/dns-query
 ^/resolve\?
 
+# ---- credential / config / infra-API leaks (2026-06 gap-loop) -------------
+(^|/)aws/credentials
+^/credentials$
+^/.*\.env$
+(^|/)secrets\.json$
+(^|/)appsettings\.json$
+^/env$
+(^|/)containers/json
+^/server-status
+^/druid/
+
 # ---- generic admin / installer probes -------------------------------------
 ^/administrator
 ^/ReportServer
@@ -84,6 +105,8 @@ phpunit/.{0,40}eval-stdin\.php
 ^/nmaplowercheck
 ^/HNAP1$
 ^/sdk$
+(^|/)Trinity\.txt
+^/hello\.world$
 
 # ---- noisy junk paths from the legacy list (random scanner tokens) --------
 ^/1rRg$
@@ -127,8 +150,6 @@ phpunit/.{0,40}eval-stdin\.php
 # Trailing volumes are from the 2026-06 corpus; comments stay on their own line
 # so an enabled pattern is a clean PCRE2 line.
 #
-# Cisco ASA SSL-VPN probe (logon_forms.js, transfer.js; ~371)
-#^/\+cscoe\+/
 # ColdFusion CKEditor / admin probe (~160)
 #^/cf_scripts/
 # PM2 ecosystem config leak (~148)
