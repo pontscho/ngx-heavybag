@@ -67,6 +67,7 @@ typedef struct {
  * mapping in heavybag_status.c.
  */
 typedef struct {
+    uint32_t      layout;            /* HEAVYBAG_STAT_SHM_LAYOUT signature  */
     time_t        start_time;        /* fresh-segment creation stamp       */
     time_t        last_reload_time;  /* bumped on reload re-attach         */
     ngx_uint_t    nvhosts;           /* length of the trailing vhost array */
@@ -97,6 +98,24 @@ typedef struct {
     ngx_atomic_t            cc_overflow;          /* table-full drops       */
     ngx_http_heavybag_stat_cc_t  cc[HEAVYBAG_STAT_CC_SLOTS];
 } ngx_http_heavybag_stat_shm_t;
+
+
+/*
+ * Layout signature stamped into the segment's first word on fresh init and
+ * verified on every re-attach. It folds in the size of both the fixed struct
+ * and the per-vhost struct, so adding / removing a counter (which shifts later
+ * fields) changes it. A persisted segment -- a Windows named mapping or SysV
+ * shm can outlive the process that created it -- laid out by an incompatible
+ * build is then rejected instead of being read at the wrong offsets, which
+ * would silently corrupt every counter. Anonymous mmap (Linux/BSD default) gets
+ * a fresh segment per generation, so this only ever fires where the OS keeps
+ * shm across a restart. Bump the magic on a same-size field reorder.
+ */
+#define HEAVYBAG_STAT_SHM_MAGIC   0x48425331u   /* "HBS1" */
+#define HEAVYBAG_STAT_SHM_LAYOUT                                               \
+    ((uint32_t) HEAVYBAG_STAT_SHM_MAGIC                                        \
+     ^ (uint32_t) sizeof(ngx_http_heavybag_stat_shm_t)                         \
+     ^ ((uint32_t) sizeof(ngx_http_heavybag_stat_vhost_t) << 16))
 
 
 /*
