@@ -18,6 +18,7 @@
 #include "waf_geo.h"
 #include "waf_status.h"
 #include "waf_rate.h"
+#include "waf_ua_parse.h"
 
 
 #define WAF_STAT_FMT_PLAIN       0
@@ -118,11 +119,11 @@ ngx_http_waf_cc_chars(uint16_t cc16, u_char out[2])
 
 /*
  * Fixed (non per-country, non per-vhost) metric-line headroom: health plus all
- * global / reason / would_block / ua / flag / scanner / resp lines, with two
- * extra WAF_REASON_MAX loops budgeted for would_block. Must stay >= the number
- * of unconditional lines the serializer emits.
+ * global / reason / would_block / ua / ua_cat / spoofed / flag / scanner / resp
+ * lines, with two extra WAF_REASON_MAX loops budgeted for would_block. Must
+ * stay >= the number of unconditional lines the serializer emits.
  */
-#define WAF_STAT_FIXED_LINES  112
+#define WAF_STAT_FIXED_LINES  128
 
 /*
  * Compute a true upper bound on the rendered body size. Each metric line is
@@ -247,6 +248,15 @@ ngx_http_waf_status_plain(u_char *p, u_char *last,
                          &waf_type_str[i],
                          (ngx_atomic_uint_t) snap->http_ua[i]);
     }
+
+    for (i = 0; i < WAF_CAT_MAX; i++) {
+        p = ngx_snprintf(p, last - p, "http_ua_cat_%V %uA\n",
+                         ngx_http_waf_category_str((ngx_http_waf_ua_category_e) i),
+                         (ngx_atomic_uint_t) snap->http_ua_cat[i]);
+    }
+
+    p = ngx_snprintf(p, last - p, "http_ua_spoofed %uA\n",
+                     (ngx_atomic_uint_t) snap->http_ua_spoofed);
 
     for (i = 0; i < WAF_FLAG_SLOTS; i++) {
         p = ngx_snprintf(p, last - p, "http_flag_%s %uA\n",
@@ -414,7 +424,16 @@ ngx_http_waf_status_json(u_char *p, u_char *last,
         first = 0;
     }
 
-    p = ngx_snprintf(p, last - p, "},\"flags\":{");
+    p = ngx_snprintf(p, last - p, "},\"ua_cat\":{");
+    for (i = 0, first = 1; i < WAF_CAT_MAX; i++) {
+        p = ngx_snprintf(p, last - p, "%s\"%V\":%uA", first ? "" : ",",
+                         ngx_http_waf_category_str((ngx_http_waf_ua_category_e) i),
+                         (ngx_atomic_uint_t) snap->http_ua_cat[i]);
+        first = 0;
+    }
+
+    p = ngx_snprintf(p, last - p, "},\"spoofed\":%uA,\"flags\":{",
+                     (ngx_atomic_uint_t) snap->http_ua_spoofed);
     for (i = 0; i < WAF_FLAG_SLOTS; i++) {
         p = ngx_snprintf(p, last - p, "%s\"%s\":%uA", i ? "," : "",
                          waf_flag_label[i],
@@ -569,6 +588,16 @@ ngx_http_waf_status_prometheus(u_char *p, u_char *last,
                          &waf_type_str[i],
                          (ngx_atomic_uint_t) snap->http_ua[i]);
     }
+
+    for (i = 0; i < WAF_CAT_MAX; i++) {
+        p = ngx_snprintf(p, last - p,
+                         "waf_ua_cat_total{category=\"%V\"} %uA\n",
+                         ngx_http_waf_category_str((ngx_http_waf_ua_category_e) i),
+                         (ngx_atomic_uint_t) snap->http_ua_cat[i]);
+    }
+
+    p = ngx_snprintf(p, last - p, "waf_ua_spoofed_total %uA\n",
+                     (ngx_atomic_uint_t) snap->http_ua_spoofed);
 
     p = ngx_snprintf(p, last - p,
                      "waf_stream_connections_total %uA\n"

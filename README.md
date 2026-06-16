@@ -740,7 +740,7 @@ What is tracked: global HTTP verdict counters (requests / allowed / allowlist
 hits / blocked-per-reason), the **`would_block`-per-reason** counters bumped by
 `detect` mode (`http_would_block_*` / `waf_http_would_block_total{reason=…}`),
 the scanner-path 404/403/444 split, response-code
-counters, the `$waf_type` UA distribution, the per-flag breakdown, a bounded
+counters, the `$waf_type` UA distribution, the descriptive **`$waf_ua_category` distribution** (`http_ua_cat_*` / `waf_ua_cat_total{category=…}`) and the **`$waf_ua_is_spoofed` count** (`http_ua_spoofed` / `waf_ua_spoofed_total`), the per-flag breakdown, a bounded
 open-addressed **per-country** table (total + blocked, with a `cc_overflow`
 guard), a **per-vhost** block breakdown (labelled by `server_name`), the STREAM
 (L4) globals (`stream_connections_total` / `stream_allowed` /
