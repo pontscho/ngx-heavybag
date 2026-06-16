@@ -959,16 +959,53 @@ check denies *before* the country decision).
 
 ## Runtime behavior
 
+The HTTP head's per-request decision chain (cheap → expensive; the **first**
+deny finalizes the request):
+
+```mermaid
+flowchart TB
+    START(["HTTP request"]) --> SUB{"main request?"}
+    SUB -- "subreq / internal redirect" --> SKIP["DECLINED — never re-scanned"]
+    SUB -- yes --> PRD["POST_READ: canonical client IP<br/>peer, or XFF from waf_trusted_proxy"]
+    PRD --> MODE{"waf mode"}
+    MODE -- off --> ALLOW(["DECLINED — request proceeds"])
+    MODE -- "detect / enforce" --> REP{"1 · IP reputation<br/>allow ▸ block ▸ geo ▸ flag ▸ asn ▸ flag_cc ▸ country"}
+    REP -- deny --> D1["403 / 404"]
+    REP -- pass --> METH{"2 · method filter<br/>allow-list / deny-list"}
+    METH -- deny --> D2["404"]
+    METH -- pass --> RATE{"3 · rate limit<br/>per-IP token bucket (for_geo)"}
+    RATE -- over --> D3["429"]
+    RATE -- pass --> UA["4 · classify $waf_type<br/>+ $waf_ua_* / spoof if stats live"]
+    UA --> BOT{"5 · bot_block<br/>scanner / empty UA?"}
+    BOT -- hostile --> D4["404"]
+    BOT -- pass --> FAKE{"6 · fake-bot<br/>crawler IP outside verified range?"}
+    FAKE -- fake --> D5["403"]
+    FAKE -- pass --> SCAN{"7 · scanner path regex"}
+    SCAN -- hit --> D6["404 / 403 / 444"]
+    SCAN -- pass --> SIG{"8 · args → cookie → referer<br/>signature buckets"}
+    SIG -- hit --> D7["404 / 403 / 444"]
+    SIG -- pass --> OK(["allowed — DECLINED<br/>$waf_reason = none / allowlist"])
+```
+
+> **Detect mode.** Every `deny` edge above is routed through the same
+> detect-aware finalizer: under `waf detect` the block is **not** applied —
+> instead `would_block[reason]` is bumped and the request continues down the
+> chain (it is allowed). The response-path `Server`-token / error-page spoof
+> runs on **every** response (allow or block), independent of this chain.
+
 **HTTP head:**
 
 - **`POST_READ` phase:** resolve the canonical client IP (peer, or XFF from
   a trusted proxy) and stash it for the reputation check.
-- **`PREACCESS` phase** (cheap → expensive): IP reputation → method filter
-  (`waf_method_allow`/`waf_method_deny`) → UA classification (`$waf_type`) →
-  scanner path regex. Classification always sets `$waf_type`;
-  `waf_bot_block` only *acts* on `scanner`/`empty`. The first deny finalizes
-  the request. `$waf_type` is also computed lazily by the variable
-  get-handler, so it is correct even when referenced under `waf off`.
+- **`PREACCESS` phase** (cheap → expensive, see the diagram above): IP
+  reputation → method filter (`waf_method_allow`/`waf_method_deny`) → per-IP
+  rate limit → UA classification (`$waf_type`) → `waf_bot_block` gate →
+  fake-bot verification → scanner path regex → args/cookie/referer signatures
+  (in that order). The rate limit runs *before* UA classification because a
+  hash + CAS is cheaper than the classification regexes. Classification always
+  sets `$waf_type`; `waf_bot_block` only *acts* on `scanner`/`empty`. The first
+  deny finalizes the request. `$waf_type` is also computed lazily by the
+  variable get-handler, so it is correct even when referenced under `waf off`.
 - **Header/body filters:** the `Server:` token is overridden to
   `waf_server_token` and built-in nginx error pages are rewritten to an
   Apache-style fingerprint. These filters install in `postconfiguration`
