@@ -587,6 +587,37 @@ the first deny wins):
      **not** in the allow list → 404 (`geo not whitelisted`); `block_cc` is
      not consulted for the country decision.
 
+```mermaid
+flowchart TB
+    IN(["client IP (sa)"]) --> AL{"allowlist match?"}
+    AL -- yes --> ALLOW(["DECLINED — allow (short-circuit)"])
+    AL -- no --> BL{"blocklist match?"}
+    BL -- yes --> F403B["403 · static blocklist"]
+    BL -- no --> DB{"waf_geo_db set?"}
+    DB -- no --> ALLOW
+    DB -- yes --> REC{"geo record found?"}
+    REC -- "no record" --> WLM1{"whitelist mode?"}
+    WLM1 -- yes --> N404A["404 · geo not whitelisted"]
+    WLM1 -- no --> ALLOW
+    REC -- found --> FLAG{"network flag match? (flag_mask)"}
+    FLAG -- yes --> F403F["403 · network flag"]
+    FLAG -- no --> ASN{"ASN in waf_asn_block? (asn=0 fails open)"}
+    ASN -- yes --> F403A["403 · asn"]
+    ASN -- no --> FCC{"special-source CC? (A1/A2/A3/T1/XD)"}
+    FCC -- yes --> F403C["403 · network flag"]
+    FCC -- no --> MODE{"whitelist or block mode?"}
+    MODE -- "whitelist (wins)" --> WLM2{"country in allow list?"}
+    WLM2 -- yes --> ALLOW
+    WLM2 -- no --> N404B["404 · geo not whitelisted"]
+    MODE -- block --> BLK{"country in block list?"}
+    BLK -- yes --> F403G["403 · geo country"]
+    BLK -- no --> ALLOW
+```
+
+The flag / ASN / special-source-CC steps run **before** the country decision
+and apply in **both** modes, so a flagged or blocklisted source is denied even
+from an otherwise-whitelisted country.
+
 The code split is deliberate: **403** for an explicit deny (blocklist / flag /
 geo-block), **404** for a whitelist miss — hide the resource so the client
 cannot tell it is geo-gated. A geo-DB miss in whitelist mode is also a 404.
@@ -661,6 +692,41 @@ request header (the real SMTP peer, injected by `ngx_mail` from
   limit it answers `Auth-Status: rate limit` and bumps the same
   `http_blocked_rate_limit` / `http_resp_429` counters as the HTTP head.
   Requires a `waf_rate_zone` declared in `http{}` (else it fail-opens).
+
+```mermaid
+sequenceDiagram
+    participant C as SMTP client
+    participant M as ngx_mail proxy
+    participant A as heavybag auth_http
+    participant R as reputation core
+    participant B as upstream MTA
+
+    C->>M: connect + AUTH
+    M->>A: auth request (Client-IP = real SMTP peer)
+
+    alt request peer is loopback / unix (trusted)
+        Note over A: judge the Client-IP address
+    else any other peer (exposed endpoint)
+        Note over A: ignore Client-IP, judge the connection peer (warn)
+    end
+
+    Note over A: Client-IP missing / unparseable -> Auth-Status OK (fail-open, warn)
+
+    A->>R: reputation_check(sa)  (+ per-IP rate limit)
+
+    alt reputation deny
+        R-->>A: forbidden ({reason})
+        A-->>M: Auth-Status {reason}
+        M-->>C: 535 5.7.0 {reason}
+    else rate limit exceeded
+        A-->>M: Auth-Status rate limit
+        M-->>C: 535 ... rate limit
+    else allow (+ waf_mail_backend set)
+        R-->>A: allow
+        A-->>M: Auth-Status OK + Auth-Server / Auth-Port
+        M->>B: proxy the session
+    end
+```
 
 **Critical:** the `auth_http` `location` must be on a server/location with
 `waf off`. Otherwise the HTTP `PREACCESS` handler runs against the
