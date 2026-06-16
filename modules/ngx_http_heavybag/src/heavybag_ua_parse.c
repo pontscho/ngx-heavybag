@@ -719,6 +719,7 @@ ngx_http_heavybag_ua_spoof_eval(ngx_http_request_t *r, ngx_http_heavybag_loc_con
 {
     ngx_http_heavybag_tls_family_e  fam_ja4, fam_ua;
     struct sockaddr           *sa;
+    ngx_str_t                  ja4;
     ngx_uint_t                 ja4_signal, cidr_signal;
 
     if (ctx->spoof_evaluated) {
@@ -730,11 +731,15 @@ ngx_http_heavybag_ua_spoof_eval(ngx_http_request_t *r, ngx_http_heavybag_loc_con
     }
 
     /* ja4_signal: TLS request whose JA4 family contradicts the UA family.
-     * Both families must be known; an unknown JA4 (absent/ambiguous) or an
-     * unmapped UA browser yields no signal (avoids false positives). */
+     * The JA4 is read on demand from the SSL connection ex-data -- NOT from a
+     * phase-populated ctx field -- so the signal survives internal redirects and
+     * a server-off / location-on config split that skip POST_READ. Both families
+     * must be known; an unknown JA4 (absent/ambiguous) or an unmapped UA browser
+     * yields no signal (avoids false positives). */
     ja4_signal = 0;
-    if (ctx->ja4.len > 0) {
-        fam_ja4 = ngx_http_heavybag_ja4_family(wlcf, &ctx->ja4);
+    ngx_http_heavybag_ja4_fetch(r, &ja4);
+    if (ja4.len > 0) {
+        fam_ja4 = ngx_http_heavybag_ja4_family(wlcf, &ja4);
         fam_ua = ngx_http_heavybag_ua_expected_tls_family(ctx->ua_browser);
         if (fam_ja4 != HEAVYBAG_TLSFAM_UNKNOWN && fam_ua != HEAVYBAG_TLSFAM_UNKNOWN
             && fam_ja4 != fam_ua)
@@ -745,13 +750,13 @@ ngx_http_heavybag_ua_spoof_eval(ngx_http_request_t *r, ngx_http_heavybag_loc_con
 
     /* cidr_signal: UA claims a verified-bot class with a configured CIDR list
      * but the client IP is outside it. Same check + same XFF trust boundary
-     * as the fake-bot block. NULL-fallback for client_sa: a getter on a
-     * `waf off` path can run before POST_READ sets ctx->client_sa. */
+     * as the fake-bot block; the client address is resolved lazily (correct
+     * across internal redirects, where POST_READ does not re-run). */
     cidr_signal = 0;
     if ((ctx->ua == HEAVYBAG_UA_CRAWLER || ctx->ua == HEAVYBAG_UA_AI_CRAWLER)
         && wlcf->verified_bot_cidrs[ctx->ua] != NULL)
     {
-        sa = (ctx->client_sa != NULL) ? ctx->client_sa : r->connection->sockaddr;
+        sa = ngx_http_heavybag_client_sa(r, wlcf, ctx);
         if (ngx_cidr_match(sa, wlcf->verified_bot_cidrs[ctx->ua]) != NGX_OK) {
             cidr_signal = 1;
         }

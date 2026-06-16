@@ -149,7 +149,8 @@ typedef struct {
     unsigned          classified:1;   /* ua field already computed            */
     ngx_str_t         spoof_body;     /* synthesized Apache error page        */
 
-    struct sockaddr  *client_sa;      /* canonical client addr (POST_READ)    */
+    unsigned          client_resolved:1; /* client_sa lazily resolved (lazy guard) */
+    struct sockaddr  *client_sa;      /* canonical client addr: socket peer or XFF  */
     socklen_t         client_socklen;
 
     ngx_http_heavybag_ua_e ua;             /* $waf_type outcome (valid iff classified) */
@@ -172,12 +173,36 @@ typedef struct {
     ngx_http_heavybag_ua_vendor_e    ua_vendor;
     ngx_str_t                   ua_version;
 
-    /* UA<->JA4 spoof (lazy via spoof_evaluated). ja4 points at the SSL
-     * ex-data ngx_str_t copied in at PREACCESS; len 0 = no TLS. */
+    /* UA<->JA4 spoof (lazy via spoof_evaluated). The JA4 fingerprint itself is
+     * read on demand from the SSL connection ex-data in the spoof eval (see
+     * ngx_http_heavybag_ja4_fetch); connection-scoped, so it survives internal
+     * redirects and a server-off / location-on split that skip POST_READ. */
     unsigned                    spoof_evaluated:1;
     unsigned                    is_spoofed:1;
-    ngx_str_t                   ja4;
 } ngx_http_heavybag_ctx_t;
+
+
+/*
+ * Fetch the per-connection JA4 fingerprint (computed by the ClientHello callback
+ * at TLS handshake and stashed on the SSL connection ex-data) into *ja4, or
+ * leave *ja4 len 0 on plain HTTP / before the ex-index exists. Connection-scoped
+ * and phase-independent -- read on demand instead of copying into the request
+ * ctx in an early HTTP phase. Defined in ngx_http_heavybag_module.c.
+ */
+void ngx_http_heavybag_ja4_fetch(ngx_http_request_t *r, ngx_str_t *ja4);
+
+
+/*
+ * Resolve the canonical client address: the socket peer, or -- only when the
+ * peer is a configured trusted proxy -- the real client from X-Forwarded-For.
+ * Resolved lazily and cached in ctx (client_resolved), so it is correct even on
+ * an internal-redirect / named-location pass, where POST_READ does not re-run
+ * and r->ctx was zeroed: r->connection->sockaddr and the XFF header survive, so
+ * the lazy resolve reproduces the POST_READ result on every hop. Never NULL.
+ * Defined in ngx_http_heavybag_module.c.
+ */
+struct sockaddr *ngx_http_heavybag_client_sa(ngx_http_request_t *r,
+    ngx_http_heavybag_loc_conf_t *wlcf, ngx_http_heavybag_ctx_t *ctx);
 
 
 extern ngx_module_t  ngx_http_heavybag_module;
