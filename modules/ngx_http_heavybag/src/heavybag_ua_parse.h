@@ -57,7 +57,8 @@ void ngx_http_heavybag_ua_parse(ngx_http_request_t *r,
  *
  * @param r    current request
  * @param wlcf location config (ja4_table + verified_bot_cidrs)
- * @param ctx  per-request WAF context (uses ctx->ja4, ctx->ua_browser, ctx->ua)
+ * @param ctx  per-request WAF context (uses ctx->ua_browser, ctx->ua; the JA4
+ *             fingerprint is read on demand via ngx_http_heavybag_ja4_fetch)
  */
 void ngx_http_heavybag_ua_spoof_eval(ngx_http_request_t *r,
     ngx_http_heavybag_loc_conf_t *wlcf, ngx_http_heavybag_ctx_t *ctx);
@@ -81,7 +82,7 @@ ngx_str_t *ngx_http_heavybag_vendor_str(ngx_http_heavybag_ua_vendor_e v);
  * unconfigured, the fingerprint is absent, or it is ambiguous.
  *
  * @param wlcf location config holding the sorted ja4_table
- * @param ja4  fingerprint to look up (e.g. ctx->ja4)
+ * @param ja4  fingerprint to look up (from ngx_http_heavybag_ja4_fetch)
  * @return coarse TLS family, or HEAVYBAG_TLSFAM_UNKNOWN
  */
 ngx_http_heavybag_tls_family_e ngx_http_heavybag_ja4_family(

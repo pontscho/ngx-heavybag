@@ -436,6 +436,50 @@ ngx_module_t  ngx_http_heavybag_module = {
 
 
 /*
+ * Resolve the canonical client address (socket peer, or the X-Forwarded-For
+ * real client when the peer is a trusted proxy). Lazy + cached in ctx so it is
+ * correct on internal-redirect / named-location passes too: POST_READ does not
+ * re-run there and r->ctx is zeroed, but r->connection->sockaddr and the XFF
+ * header survive, so a fresh ctx re-resolves to the same address. Never NULL.
+ *
+ * On a redirect the first reader's loc_conf wins (result is cached): the trust
+ * check keys on the socket peer, not the URI, so the answer is stable unless
+ * trusted_proxy lists diverge per location.
+ */
+struct sockaddr *
+ngx_http_heavybag_client_sa(ngx_http_request_t *r,
+    ngx_http_heavybag_loc_conf_t *wlcf, ngx_http_heavybag_ctx_t *ctx)
+{
+    ngx_addr_t  addr;
+
+    if (ctx->client_resolved) {
+        return ctx->client_sa;
+    }
+
+    ctx->client_sa = r->connection->sockaddr;
+    ctx->client_socklen = r->connection->socklen;
+
+    if (wlcf->trusted_proxy != NULL && r->headers_in.x_forwarded_for != NULL) {
+
+        addr.sockaddr = r->connection->sockaddr;
+        addr.socklen = r->connection->socklen;
+
+        if (ngx_http_get_forwarded_addr(r, &addr,
+                                        r->headers_in.x_forwarded_for, NULL,
+                                        wlcf->trusted_proxy, 1)
+            == NGX_OK)
+        {
+            ctx->client_sa = addr.sockaddr;
+            ctx->client_socklen = addr.socklen;
+        }
+    }
+
+    ctx->client_resolved = 1;
+    return ctx->client_sa;
+}
+
+
+/*
  * POST_READ phase. Resolve the canonical client address: the socket peer
  * by default, or -- only when the peer is a configured trusted proxy --
  * the real client taken from X-Forwarded-For. The result is stashed in
@@ -444,7 +488,6 @@ ngx_module_t  ngx_http_heavybag_module = {
 static ngx_int_t
 ngx_http_heavybag_postread_handler(ngx_http_request_t *r)
 {
-    ngx_addr_t                addr;
     ngx_http_heavybag_ctx_t       *ctx;
     ngx_http_heavybag_loc_conf_t  *wlcf;
 
@@ -467,46 +510,9 @@ ngx_http_heavybag_postread_handler(ngx_http_request_t *r)
         ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
     }
 
-    ctx->client_sa = r->connection->sockaddr;
-    ctx->client_socklen = r->connection->socklen;
-
-    if (wlcf->trusted_proxy != NULL && r->headers_in.x_forwarded_for != NULL) {
-
-        addr.sockaddr = r->connection->sockaddr;
-        addr.socklen = r->connection->socklen;
-
-        if (ngx_http_get_forwarded_addr(r, &addr,
-                                        r->headers_in.x_forwarded_for, NULL,
-                                        wlcf->trusted_proxy, 1)
-            == NGX_OK)
-        {
-            ctx->client_sa = addr.sockaddr;
-            ctx->client_socklen = addr.socklen;
-        }
-    }
-
-#if (NGX_HTTP_SSL)
-    /*
-     * Copy the per-connection JA4 (computed by the ClientHello callback at TLS
-     * handshake, before any HTTP phase) into ctx HERE at POST_READ -- the
-     * earliest phase -- so every later phase sees it, including REWRITE-phase
-     * consumers of $waf_ua_is_spoofed (e.g. `if ($waf_ua_is_spoofed)`). Points
-     * at the ex-data ngx_str_t (no copy); ctx->ja4.len 0 stays = no TLS ->
-     * JA4 spoof half is inert. heavybag_ua_parse.c never sees the static ssl index.
-     */
-    if (ngx_http_heavybag_ja4_ssl_index >= 0
-        && r->connection->ssl != NULL
-        && r->connection->ssl->connection != NULL)
-    {
-        ngx_str_t  *ja4j;
-
-        ja4j = SSL_get_ex_data(r->connection->ssl->connection,
-                               ngx_http_heavybag_ja4_ssl_index);
-        if (ja4j != NULL && ja4j->len != 0) {
-            ctx->ja4 = *ja4j;
-        }
-    }
-#endif
+    /* prime the canonical client address on the main request; the lazy resolver
+     * re-derives it on internal-redirect passes where this phase is skipped */
+    (void) ngx_http_heavybag_client_sa(r, wlcf, ctx);
 
     return NGX_DECLINED;
 }
@@ -896,7 +902,7 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
         }
     }
 
-    sa = (ctx->client_sa != NULL) ? ctx->client_sa : r->connection->sockaddr;
+    sa = ngx_http_heavybag_client_sa(r, wlcf, ctx);
 
     rc = ngx_http_heavybag_reputation_check(&wlcf->rep, sa, &reason, &verdict);
 
@@ -2189,8 +2195,7 @@ ngx_http_heavybag_country_variable(ngx_http_request_t *r,
         wlcf = ngx_http_get_module_loc_conf(r, ngx_http_heavybag_module);
 
         if (wlcf->rep.geo_db != NULL) {
-            sa = (ctx->client_sa != NULL) ? ctx->client_sa
-                                          : r->connection->sockaddr;
+            sa = ngx_http_heavybag_client_sa(r, wlcf, ctx);
             ngx_http_heavybag_geo_lookup(wlcf->rep.geo_db, sa, &res);
 
             if (res.found) {
@@ -2284,8 +2289,7 @@ ngx_http_heavybag_asn_variable(ngx_http_request_t *r,
         wlcf = ngx_http_get_module_loc_conf(r, ngx_http_heavybag_module);
 
         if (wlcf->rep.geo_db != NULL) {
-            sa = (ctx->client_sa != NULL) ? ctx->client_sa
-                                          : r->connection->sockaddr;
+            sa = ngx_http_heavybag_client_sa(r, wlcf, ctx);
             ngx_http_heavybag_geo_lookup(wlcf->rep.geo_db, sa, &res);
 
             if (res.found) {
@@ -2320,34 +2324,59 @@ ngx_http_heavybag_asn_variable(ngx_http_request_t *r,
 
 
 /*
- * $waf_ja4_hash: the JA4 TLS fingerprint computed by the client_hello callback
- * at handshake and stashed on the SSL connection (ex-data). NOT recomputed
- * here -- the raw ClientHello is long gone by request time. not_found on plain
- * HTTP, when no JA4 was stored, or before the ex-index is allocated.
+ * Fetch the per-connection JA4 fingerprint (computed by the ClientHello callback
+ * at handshake, stashed on the SSL connection ex-data) into *ja4. Leaves *ja4
+ * len 0 on plain HTTP, when no JA4 was stored, or before the ex-index exists.
+ * Connection-scoped and phase-independent: the $waf_ja4 variable and the UA<->JA4
+ * spoof eval both read it on demand HERE, so it survives internal redirects and a
+ * server-off / location-on config split that skip the early HTTP phases.
+ */
+void
+ngx_http_heavybag_ja4_fetch(ngx_http_request_t *r, ngx_str_t *ja4)
+{
+    ja4->len = 0;
+    ja4->data = NULL;
+
+#if (NGX_HTTP_SSL)
+    {
+        ngx_str_t       *j;
+        ngx_ssl_conn_t  *ssl_conn;
+
+        if (ngx_http_heavybag_ja4_ssl_index >= 0
+            && r->connection->ssl != NULL
+            && (ssl_conn = r->connection->ssl->connection) != NULL)
+        {
+            j = SSL_get_ex_data(ssl_conn, ngx_http_heavybag_ja4_ssl_index);
+            if (j != NULL && j->len != 0) {
+                *ja4 = *j;
+            }
+        }
+    }
+#endif
+}
+
+
+/*
+ * $waf_ja4_hash: the JA4 TLS fingerprint for this connection (see
+ * ngx_http_heavybag_ja4_fetch). NOT recomputed here -- the raw ClientHello is
+ * long gone by request time. not_found when no JA4 is available.
  */
 static ngx_int_t
 ngx_http_heavybag_ja4_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
 {
-#if (NGX_HTTP_SSL)
-    ngx_str_t       *j;
-    ngx_ssl_conn_t  *ssl_conn;
+    ngx_str_t  ja4;
 
-    if (ngx_http_heavybag_ja4_ssl_index >= 0
-        && r->connection->ssl != NULL
-        && (ssl_conn = r->connection->ssl->connection) != NULL)
-    {
-        j = SSL_get_ex_data(ssl_conn, ngx_http_heavybag_ja4_ssl_index);
-        if (j != NULL && j->len != 0) {
-            v->len = j->len;
-            v->data = j->data;
-            v->valid = 1;
-            v->no_cacheable = 1;
-            v->not_found = 0;
-            return NGX_OK;
-        }
+    ngx_http_heavybag_ja4_fetch(r, &ja4);
+
+    if (ja4.len != 0) {
+        v->len = ja4.len;
+        v->data = ja4.data;
+        v->valid = 1;
+        v->no_cacheable = 1;
+        v->not_found = 0;
+        return NGX_OK;
     }
-#endif
 
     v->valid = 0;
     v->no_cacheable = 1;
