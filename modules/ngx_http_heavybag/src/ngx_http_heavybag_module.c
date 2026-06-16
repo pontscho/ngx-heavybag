@@ -2599,16 +2599,32 @@ ngx_http_heavybag_stat_init_zone(ngx_shm_zone_t *shm_zone, void *data)
 
     shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
 
-    /* reload: re-use the previous cycle's struct verbatim, stamp the reload */
+    /* reload: re-use the previous cycle's struct verbatim, stamp the reload --
+     * but only if it was laid out by a build with the same layout signature */
     if (osh != NULL) {
+        if (osh->layout != HEAVYBAG_STAT_SHM_LAYOUT) {
+            ngx_log_error(NGX_LOG_EMERG, shm_zone->shm.log, 0,
+                          "heavybag: status zone layout changed across reload; "
+                          "a full restart is required for waf_status");
+            return NGX_ERROR;
+        }
         osh->last_reload_time = ngx_time();
         shm_zone->data = osh;
         return NGX_OK;
     }
 
-    /* worker re-attach to an existing segment */
+    /* re-attach to a persisted segment (a Windows / SysV shm can outlive the
+     * process that made it): reject an incompatible layout rather than read it
+     * at shifted offsets and silently corrupt every counter */
     if (shm_zone->shm.exists) {
-        shm_zone->data = shpool->data;
+        sh = shpool->data;
+        if (sh == NULL || sh->layout != HEAVYBAG_STAT_SHM_LAYOUT) {
+            ngx_log_error(NGX_LOG_EMERG, shm_zone->shm.log, 0,
+                          "heavybag: status zone layout changed or stale on "
+                          "re-attach; a full restart is required for waf_status");
+            return NGX_ERROR;
+        }
+        shm_zone->data = sh;
         return NGX_OK;
     }
 
@@ -2626,6 +2642,7 @@ ngx_http_heavybag_stat_init_zone(ngx_shm_zone_t *shm_zone, void *data)
     }
 
     ngx_memzero(sh, size);
+    sh->layout = HEAVYBAG_STAT_SHM_LAYOUT;
     sh->start_time = ngx_time();
     sh->last_reload_time = sh->start_time;
     sh->nvhosts = wmcf->nvhosts;
