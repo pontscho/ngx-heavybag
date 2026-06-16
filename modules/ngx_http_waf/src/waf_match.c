@@ -363,6 +363,150 @@ ngx_http_waf_ua_list_compile(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
 }
 
 
+/* Map a family token from lists/ja4.list to the coarse-family enum. An
+ * unrecognized token (including the literal "unknown" emitted for ambiguous
+ * fingerprints) maps to WAF_TLSFAM_UNKNOWN -> the lookup can never produce a
+ * false-positive spoof for it. */
+static ngx_http_waf_tls_family_e
+ngx_http_waf_ja4_family_parse(u_char *s, size_t len)
+{
+    if (len == sizeof("chromium") - 1
+        && ngx_strncasecmp(s, (u_char *) "chromium", len) == 0)
+    {
+        return WAF_TLSFAM_CHROMIUM;
+    }
+    if (len == sizeof("firefox") - 1
+        && ngx_strncasecmp(s, (u_char *) "firefox", len) == 0)
+    {
+        return WAF_TLSFAM_FIREFOX;
+    }
+    if (len == sizeof("safari") - 1
+        && ngx_strncasecmp(s, (u_char *) "safari", len) == 0)
+    {
+        return WAF_TLSFAM_SAFARI;
+    }
+    if (len == sizeof("tool") - 1
+        && ngx_strncasecmp(s, (u_char *) "tool", len) == 0)
+    {
+        return WAF_TLSFAM_TOOL;
+    }
+    if (len == sizeof("bot") - 1
+        && ngx_strncasecmp(s, (u_char *) "bot", len) == 0)
+    {
+        return WAF_TLSFAM_BOT;
+    }
+    return WAF_TLSFAM_UNKNOWN;
+}
+
+
+/* Total order over ja4 keys: lexicographic with a length tiebreak. MUST match
+ * the bsearch comparison in waf_ua_parse.c:waf_ja4_family_lookup so the sorted
+ * table is searchable. */
+static int ngx_libc_cdecl
+ngx_http_waf_ja4_entry_cmp(const void *a, const void *b)
+{
+    const ngx_http_waf_ja4_entry_t  *ea = a;
+    const ngx_http_waf_ja4_entry_t  *eb = b;
+    size_t                           m;
+    ngx_int_t                        c;
+
+    m = ea->ja4.len < eb->ja4.len ? ea->ja4.len : eb->ja4.len;
+    c = m ? (ngx_int_t) ngx_memcmp(ea->ja4.data, eb->ja4.data, m) : 0;
+    if (c != 0) {
+        return (c < 0) ? -1 : 1;
+    }
+    if (ea->ja4.len < eb->ja4.len) { return -1; }
+    if (ea->ja4.len > eb->ja4.len) { return 1; }
+    return 0;
+}
+
+
+/*
+ * Config-time loader for lists/ja4.list. Each significant line is
+ *
+ *     <ja4-fingerprint> <coarse-family>
+ *
+ * (e.g. "t13d1516h2_8daaf6152771_e5627efa2ab1 chromium"). The fingerprint is
+ * copied into cf->pool (the temp-pool content buffer is freed after config),
+ * paired with its parsed family, pushed into a cf->pool array, then sorted by
+ * the ja4 bytes so the per-request lookup (ngx_http_waf_ja4_family) can
+ * bsearch it. Lines missing the family token are skipped with a warning.
+ */
+ngx_int_t
+ngx_http_waf_ja4_list_compile(ngx_conf_t *cf, ngx_http_waf_loc_conf_t *wlcf,
+    ngx_str_t *path)
+{
+    u_char                    *p, *end, *ls, *le, *ks, *ke, *fs, *kd;
+    ngx_str_t                  content, key;
+    ngx_uint_t                 total;
+    ngx_array_t               *table;
+    ngx_http_waf_ja4_entry_t  *e;
+
+    if (ngx_http_waf_read_file(cf, path, &content) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    table = ngx_array_create(cf->pool, 64, sizeof(ngx_http_waf_ja4_entry_t));
+    if (table == NULL) {
+        return NGX_ERROR;
+    }
+
+    total = 0;
+    p = content.data;
+    end = p + content.len;
+
+    while (ngx_http_waf_next_line(&p, end, &ls, &le) == NGX_OK) {
+
+        /* key = up to first whitespace; family = first token after it */
+        ks = ls;
+        ke = ls;
+        while (ke < le && *ke != ' ' && *ke != '\t') {
+            ke++;
+        }
+
+        fs = ke;
+        while (fs < le && (*fs == ' ' || *fs == '\t')) {
+            fs++;
+        }
+
+        if (ke == ks || fs == le) {
+            ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                "waf: malformed ja4.list line in \"%V\" (need \"<ja4> <family>\"), "
+                "skipping", path);
+            continue;
+        }
+
+        key.len = ke - ks;
+        kd = ngx_pnalloc(cf->pool, key.len);
+        if (kd == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_memcpy(kd, ks, key.len);
+        key.data = kd;
+
+        e = ngx_array_push(table);
+        if (e == NULL) {
+            return NGX_ERROR;
+        }
+        e->ja4 = key;
+        e->family = ngx_http_waf_ja4_family_parse(fs, (size_t) (le - fs));
+        total++;
+    }
+
+    if (table->nelts > 1) {
+        ngx_qsort(table->elts, table->nelts,
+                  sizeof(ngx_http_waf_ja4_entry_t), ngx_http_waf_ja4_entry_cmp);
+    }
+
+    wlcf->ja4_table = table;
+
+    ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0,
+        "waf: loaded %ui ja4 fingerprint(s) from \"%V\"", total, path);
+
+    return NGX_OK;
+}
+
+
 ngx_int_t
 ngx_http_waf_verified_bot_compile(ngx_conf_t *cf, ngx_array_t **arr,
     ngx_str_t *path)

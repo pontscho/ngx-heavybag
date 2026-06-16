@@ -51,3 +51,9 @@ ngxlogs/
 # the enforce harness asserts. Only the freeze/harness per-run scratch dir
 # (detect/enforce probe outputs, covered-subset feeds, compare.pl) is ignored.
 /modules/ngx_http_waf/tests/corpus/.freeze-tmp/
+
+# Python bytecode cache (created when the offline ja4.list regen script under
+# modules/ngx_http_waf/tools/ is imported as a module for diagnostics; never
+# source -- the .py itself is committed, the cache is regenerated on demand).
+__pycache__/
+*.pyc

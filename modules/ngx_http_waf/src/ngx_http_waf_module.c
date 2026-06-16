@@ -16,6 +16,7 @@
 #include "waf_status.h"
 #include "waf_rate.h"
 #include "waf_ja4.h"
+#include "waf_ua_parse.h"
 
 #if (NGX_HTTP_SSL)
 #include <ngx_http_ssl_module.h>
@@ -107,6 +108,8 @@ static char *ngx_http_waf_set_ua_list(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_verified_bot(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_http_waf_set_ja4_list(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static char *ngx_http_waf_set_sig_list(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_waf_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -160,6 +163,16 @@ static ngx_int_t ngx_http_waf_reason_variable(ngx_http_request_t *r,
 static ngx_int_t ngx_http_waf_asn_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_waf_ja4_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_waf_ua_browser_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_waf_ua_browser_version_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_waf_ua_category_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_waf_ua_vendor_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_http_waf_ua_spoofed_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 
 
@@ -373,6 +386,16 @@ static ngx_command_t  ngx_http_waf_commands[] = {
     { ngx_string("waf_rate_limit"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
       ngx_http_waf_set_rate_limit,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* waf_ja4_list <path>: load the JA4 fingerprint -> coarse-TLS-family table
+     * consumed by $waf_ua_is_spoofed. Optional: absent -> the JA4 half of the
+     * spoof signal is inert (CIDR-only). */
+    { ngx_string("waf_ja4_list"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_waf_set_ja4_list,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
@@ -973,6 +996,27 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
      */
     ngx_http_waf_ua_classify(r, wlcf, ctx);
 
+#if (NGX_HTTP_SSL)
+    /*
+     * Copy the per-connection JA4 (computed by the ClientHello callback before
+     * any phase handler runs) into ctx so waf_ua_parse.c can read it without
+     * seeing the file-static ssl ex-data index. Point at the ex-data ngx_str_t
+     * (no copy); ctx->ja4.len 0 stays = no TLS -> JA4 spoof half is inert.
+     */
+    if (ngx_http_waf_ja4_ssl_index >= 0
+        && r->connection->ssl != NULL
+        && r->connection->ssl->connection != NULL)
+    {
+        ngx_str_t  *ja4j;
+
+        ja4j = SSL_get_ex_data(r->connection->ssl->connection,
+                               ngx_http_waf_ja4_ssl_index);
+        if (ja4j != NULL && ja4j->len != 0) {
+            ctx->ja4 = *ja4j;
+        }
+    }
+#endif
+
     /* UA distribution over every reputation-passed (classified) request */
     if (sh != NULL && (ngx_uint_t) ctx->ua < WAF_UA_MAX) {
         (void) ngx_atomic_fetch_add(&sh->http_ua[ctx->ua], 1);
@@ -1236,6 +1280,12 @@ ngx_http_waf_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         }
     }
 
+    /* inherit the JA4 family table + its path sentinel when unset here */
+    if (conf->ja4_list.data == NULL) {
+        conf->ja4_list = prev->ja4_list;
+        conf->ja4_table = prev->ja4_table;
+    }
+
     ngx_conf_merge_str_value(conf->server_token, prev->server_token,
                              NGX_HTTP_WAF_DEFAULT_TOKEN);
 
@@ -1415,6 +1465,32 @@ ngx_http_waf_set_ua_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     if (ngx_http_waf_ua_list_compile(cf, wlcf, &value[1], cat) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * waf_ja4_list <path>: load the JA4 fingerprint -> coarse-TLS-family table.
+ * ja4_list is the path sentinel for the duplicate guard and inherit-on-merge
+ * (mirrors verified_bot_list[]). Optional directive; when absent the JA4 half
+ * of $waf_ua_is_spoofed is inert and the signal degrades to CIDR-only.
+ */
+static char *
+ngx_http_waf_set_ja4_list(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_waf_loc_conf_t  *wlcf = conf;
+    ngx_str_t                *value = cf->args->elts;
+
+    if (wlcf->ja4_list.data != NULL) {
+        return "is duplicate";
+    }
+
+    if (ngx_http_waf_ja4_list_compile(cf, wlcf, &value[1]) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    wlcf->ja4_list = value[1];
 
     return NGX_CONF_OK;
 }
@@ -1939,6 +2015,11 @@ ngx_http_waf_preconfiguration(ngx_conf_t *cf)
     ngx_str_t             reason_name = ngx_string("waf_reason");
     ngx_str_t             asn_name = ngx_string("waf_asn");
     ngx_str_t             ja4_name = ngx_string("waf_ja4_hash");
+    ngx_str_t             ua_browser_name = ngx_string("waf_ua_browser");
+    ngx_str_t             ua_version_name = ngx_string("waf_ua_browser_version");
+    ngx_str_t             ua_category_name = ngx_string("waf_ua_category");
+    ngx_str_t             ua_vendor_name = ngx_string("waf_ua_vendor");
+    ngx_str_t             ua_spoofed_name = ngx_string("waf_ua_is_spoofed");
     ngx_http_variable_t  *var;
 
     var = ngx_http_add_variable(cf, &type_name, NGX_HTTP_VAR_NOCACHEABLE);
@@ -1970,6 +2051,36 @@ ngx_http_waf_preconfiguration(ngx_conf_t *cf)
         return NGX_ERROR;
     }
     var->get_handler = ngx_http_waf_ja4_variable;
+
+    var = ngx_http_add_variable(cf, &ua_browser_name, NGX_HTTP_VAR_NOCACHEABLE);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+    var->get_handler = ngx_http_waf_ua_browser_variable;
+
+    var = ngx_http_add_variable(cf, &ua_version_name, NGX_HTTP_VAR_NOCACHEABLE);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+    var->get_handler = ngx_http_waf_ua_browser_version_variable;
+
+    var = ngx_http_add_variable(cf, &ua_category_name, NGX_HTTP_VAR_NOCACHEABLE);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+    var->get_handler = ngx_http_waf_ua_category_variable;
+
+    var = ngx_http_add_variable(cf, &ua_vendor_name, NGX_HTTP_VAR_NOCACHEABLE);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+    var->get_handler = ngx_http_waf_ua_vendor_variable;
+
+    var = ngx_http_add_variable(cf, &ua_spoofed_name, NGX_HTTP_VAR_NOCACHEABLE);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+    var->get_handler = ngx_http_waf_ua_spoofed_variable;
 
     return NGX_OK;
 }
@@ -2207,6 +2318,176 @@ ngx_http_waf_ja4_variable(ngx_http_request_t *r,
     v->valid = 0;
     v->no_cacheable = 1;
     v->not_found = 1;
+    return NGX_OK;
+}
+
+
+/* $waf_ua_is_spoofed renders one of these two static literals. */
+static ngx_str_t  waf_bool_str[] = {
+    ngx_string("0"),
+    ngx_string("1"),
+};
+
+
+/*
+ * Shared helper for the four descriptive UA getters: fetch-or-alloc ctx and
+ * lazily run the descriptive parse. Returns the ctx, or NULL on alloc failure.
+ */
+static ngx_http_waf_ctx_t *
+ngx_http_waf_ua_ctx_parsed(ngx_http_request_t *r)
+{
+    ngx_http_waf_ctx_t       *ctx;
+    ngx_http_waf_loc_conf_t  *wlcf;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_waf_module);
+    if (ctx == NULL) {
+        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_waf_ctx_t));
+        if (ctx == NULL) {
+            return NULL;
+        }
+        ngx_http_set_ctx(r, ctx, ngx_http_waf_module);
+    }
+
+    if (!ctx->ua_parsed) {
+        wlcf = ngx_http_get_module_loc_conf(r, ngx_http_waf_module);
+        ngx_http_waf_ua_parse(r, wlcf, ctx);
+    }
+
+    return ctx;
+}
+
+
+static ngx_int_t
+ngx_http_waf_ua_browser_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_str_t           *s;
+    ngx_http_waf_ctx_t  *ctx;
+
+    ctx = ngx_http_waf_ua_ctx_parsed(r);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    s = ngx_http_waf_browser_str(ctx->ua_browser);
+
+    v->len = s->len;
+    v->data = s->data;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_waf_ua_browser_version_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_http_waf_ctx_t  *ctx;
+
+    ctx = ngx_http_waf_ua_ctx_parsed(r);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    /* len 0: no version token (or it was all out-of-charset bytes) -> unset */
+    if (ctx->ua_version.len == 0) {
+        v->valid = 0;
+        v->no_cacheable = 1;
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->len = ctx->ua_version.len;
+    v->data = ctx->ua_version.data;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_waf_ua_category_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_str_t           *s;
+    ngx_http_waf_ctx_t  *ctx;
+
+    ctx = ngx_http_waf_ua_ctx_parsed(r);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    s = ngx_http_waf_category_str(ctx->ua_category);
+
+    v->len = s->len;
+    v->data = s->data;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_waf_ua_vendor_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_str_t           *s;
+    ngx_http_waf_ctx_t  *ctx;
+
+    ctx = ngx_http_waf_ua_ctx_parsed(r);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    s = ngx_http_waf_vendor_str(ctx->ua_vendor);
+
+    v->len = s->len;
+    v->data = s->data;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_waf_ua_spoofed_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_str_t                *s;
+    ngx_http_waf_ctx_t       *ctx;
+    ngx_http_waf_loc_conf_t  *wlcf;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_waf_module);
+    if (ctx == NULL) {
+        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_waf_ctx_t));
+        if (ctx == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_http_set_ctx(r, ctx, ngx_http_waf_module);
+    }
+
+    if (!ctx->spoof_evaluated) {
+        wlcf = ngx_http_get_module_loc_conf(r, ngx_http_waf_module);
+        ngx_http_waf_ua_spoof_eval(r, wlcf, ctx);
+    }
+
+    s = &waf_bool_str[ctx->is_spoofed];
+
+    v->len = s->len;
+    v->data = s->data;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
     return NGX_OK;
 }
 
