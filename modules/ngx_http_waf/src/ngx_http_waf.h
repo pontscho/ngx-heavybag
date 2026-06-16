@@ -16,6 +16,7 @@
 #include <ngx_http.h>
 
 #include "waf_rep.h"   /* shared ngx_waf_rep_conf_t + reputation core */
+#include "ngx_http_waf_ua_enums.h"  /* descriptive UA / TLS-family enums */
 
 
 /*
@@ -122,6 +123,14 @@ typedef struct {
     ngx_str_t                      mail_backend_addr; /* waf_mail_backend ip  */
     ngx_str_t                      mail_backend_port; /* waf_mail_backend port*/
 
+    /* JA4 fingerprint -> coarse TLS family table (waf_ja4_list <path>).
+     * Sorted ngx_array_t of ngx_http_waf_ja4_entry_t, bsearch'd at runtime.
+     * NULL = unconfigured -> ja4_family() yields UNKNOWN -> no JA4 spoof
+     * signal (the feature degrades to the CIDR-only half). ja4_list is the
+     * path sentinel for the duplicate guard and inherit-on-merge. */
+    ngx_array_t                   *ja4_table;
+    ngx_str_t                      ja4_list;
+
     /* per-IP token-bucket rate limit rules (waf_rate_limit); the default
      * rule -- if any -- is the one with a NULL geo_cc. NULL = no limiting.
      * Element type is ngx_http_waf_rate_rule_t (see waf_rate.h). */
@@ -152,6 +161,22 @@ typedef struct {
 
     unsigned              asn_done:1;     /* asn resolved (lazy guard)              */
     uint32_t              asn;            /* $waf_asn outcome; 0=unknown            */
+
+    /* descriptive UA parse (lazy via ua_parsed). The four enum fields index
+     * static string tables; ua_version is a slice INTO the UA header value
+     * (never copied), charset-restricted to [0-9A-Za-z._-] at the source. */
+    unsigned                    ua_parsed:1;
+    ngx_http_waf_ua_browser_e   ua_browser;
+    ngx_http_waf_ua_os_e        ua_os;
+    ngx_http_waf_ua_category_e  ua_category;
+    ngx_http_waf_ua_vendor_e    ua_vendor;
+    ngx_str_t                   ua_version;
+
+    /* UA<->JA4 spoof (lazy via spoof_evaluated). ja4 points at the SSL
+     * ex-data ngx_str_t copied in at PREACCESS; len 0 = no TLS. */
+    unsigned                    spoof_evaluated:1;
+    unsigned                    is_spoofed:1;
+    ngx_str_t                   ja4;
 } ngx_http_waf_ctx_t;
 
 

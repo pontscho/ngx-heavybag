@@ -37,3 +37,18 @@ Scrapy
 libwww-perl
 Wget
 Apache-HttpClient
+
+# -- 2026 curated additions -------------------------------------------------
+hey/
+WhatsApp
+Pinterestbot
+StatusCake
+Site24x7
+Chrome-Lighthouse
+python-httpx
+aiohttp
+Python-urllib
+GuzzleHttp
+node-fetch
+undici
+reqwest

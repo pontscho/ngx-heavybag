@@ -71,5 +71,17 @@ ngx_int_t ngx_http_waf_verified_bot_compile(ngx_conf_t *cf, ngx_array_t **arr,
 void ngx_http_waf_ua_classify(ngx_http_request_t *r,
     ngx_http_waf_loc_conf_t *wlcf, ngx_http_waf_ctx_t *ctx);
 
+/*
+ * Read the JA4 fingerprint -> coarse-TLS-family list referenced by *path into
+ * wlcf->ja4_table. Each non-comment, non-blank line is "<ja4> <family>" where
+ * <family> is chromium/firefox/safari/tool/bot/unknown. The table is copied
+ * into cf->pool and sorted by the ja4 bytes so the per-request lookup
+ * (ngx_http_waf_ja4_family, waf_ua_parse.c) can bsearch it. A missing/unreadable
+ * file is fatal (reload aborts); malformed lines are skipped with a warning.
+ * Runs at configuration time (directive setter); reload-safe via cf->pool.
+ */
+ngx_int_t ngx_http_waf_ja4_list_compile(ngx_conf_t *cf,
+    ngx_http_waf_loc_conf_t *wlcf, ngx_str_t *path);
+
 
 #endif /* _WAF_MATCH_H_INCLUDED_ */

@@ -24,3 +24,12 @@ hydra
 arachni
 dirsearch
 openvas
+
+# -- 2026 curated additions (internet-wide scanners / measurement) ----------
+Censys
+CensysInspect
+Shodan
+InternetMeasurement
+Expanse
+l9explore
+l9tcpid

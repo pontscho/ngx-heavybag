@@ -194,6 +194,7 @@ variable, independent of `waf` / `waf_bot_block`.
 | `waf_bot_list` | `<path>` | — | UA signatures for social/monitor/feed/HTTP-library clients → `$waf_type=bot`. |
 | `waf_fake_bot_block` | `on`\|`off` | `off` | Verify a self-declared crawler really originates from its operator's published IP ranges. When `on`, a request whose `$waf_type` is `crawler`/`ai-crawler` **and** whose class has a `waf_verified_bot` CIDR list configured is blocked **403** when the canonical client IP is **not** inside that list (a fake bot). A class with no list is silently skipped. Independent of `waf_bot_block`; detect-mode-aware (records `would_block[fake_bot]`). See [Verified-bot verification](#verified-bot-fake-bot-verification). |
 | `waf_verified_bot` | `<class> <path>` | — | Load the published CIDR allowlist for one verifiable class. `<class>` is `crawler` or `ai_crawler` (any other token is a config error); `<path>` is a plain CIDR-per-line file. Per class; **hot-reloadable**. Used only when `waf_fake_bot_block` is `on`. |
+| `waf_ja4_list` | `<path>` | — | Load the JA4-fingerprint → coarse-TLS-family table (`<ja4> <family>` per line; family ∈ `chromium`/`firefox`/`safari`/`tool`/`bot`/`unknown`) consumed by [`$waf_ua_is_spoofed`](#descriptive-ua-variables-waf_ua_). **Optional** — when unset the JA4 half of the spoof signal is inert and `$waf_ua_is_spoofed` degrades to the CIDR-only half. Regenerate offline from a ja4db dump (procedure in the shipped `lists/ja4.list` header). Hot-reloadable. |
 | `waf_server_token` | `<string>` | `Apache/2.4.68 (Unix)` | The fake `Server:` token and the error-page fingerprint. |
 | `waf_reason_header` | `on`\|`off` | `off` | Stamp the per-request WAF verdict token (`$waf_reason`: `none`, `scanner_path`, `args`, `fake_bot`, …) onto the response as `X-WAF-Reason`. **OFF by default — production must not disclose which rule matched** (it aids evasion). Intended for the detect-mode replay/test harness, where it gives per-request verdict attribution on the wire. Independent of `waf` mode (renders `none` when no verdict was resolved). |
 | `waf_geo_db` | `<path>` | — | Path to the IPFire `location.db` (mmap'd read-only; read by the embedded nanolibloc adaptation, no libloc dependency). |
@@ -384,6 +385,43 @@ log_format waf '$remote_addr $status type=$waf_type '
                'ja4=$waf_ja4_hash';
 access_log /var/log/nginx/access.log waf;
 ```
+
+### Descriptive UA variables (`$waf_ua_*`)
+
+A second, independent UA layer parses the User-Agent into five more
+`NOCACHEABLE` variables. It **only produces data** — it makes no blocking
+decision; the consumer (config `map`/`if`/`return`) decides. The parse is lazy
+(once per request) and allocation-free: four values are static enum-table
+strings and the version is a zero-copy slice into the UA, charset-restricted to
+`[0-9A-Za-z._-]` at the source (so it can never carry CR/LF/quote/control-char
+injection into a log or response-header sink).
+
+| Variable | Value |
+|---|---|
+| `$waf_ua_browser` | Browser/client family: `chrome`, `firefox`, `safari`, `edge`, `opera`, `operagx`, `yabrowser`, `samsung`, `vivaldi`, `headlesschrome`, `duckduckgo`, `huaweibrowser`, `ucbrowser`, `whale`, `curl`, `wget`, `ffmpeg`, `python`, `gohttp`, `java`, `okhttp`, … (`unknown` if none matched). Chromium-derivative tokens are detected **before** the bare `Chrome/` token. Brave/Arc ship a Chrome-identical UA and are reported as `chrome` (undetectable server-side). |
+| `$waf_ua_browser_version` | The version token following the browser marker (e.g. `120.0.0.0`). *Not found* (`-`) when absent. Chromium froze the minor/patch at `0.0.0`, so only the major is reliable for Chromium browsers. |
+| `$waf_ua_category` | Device class `mobile`/`tablet`/`pc`/`tv`/`console`, **overridden** by the threat class `scanner`/`ai-crawler`/`crawler`/`bot` when `$waf_type` matched one. `unknown` otherwise. |
+| `$waf_ua_vendor` | `apple`/`google`/`microsoft`/`mozilla`/`yandex`/`samsung`/`opera`/`huawei`/`naver`/`duckduckgo`/… plus crawler-vendor attribution (Googlebot→`google`, bingbot→`microsoft`, Baiduspider→`baidu`, …). `unknown` otherwise. |
+| `$waf_ua_is_spoofed` | `"1"` when the UA contradicts the TLS/network evidence, else `"0"`. Two signals OR'd: **(a) JA4** — a TLS request whose JA4 coarse family (looked up in `waf_ja4_list`) contradicts the family the UA browser should present (the unforgeable, HTTPS-only half); **(b) CIDR** — a UA claiming a verified-bot class whose client IP is outside that class's `waf_verified_bot` range. Both signals are conservative (an unknown/ambiguous JA4 or an unmapped browser never triggers). |
+
+```nginx
+waf_ja4_list /etc/nginx/lists/ja4.list;     # optional; enables the JA4 spoof half
+
+log_format waf_ua '$remote_addr browser=$waf_ua_browser ver="$waf_ua_browser_version" '
+                  'cat=$waf_ua_category vendor=$waf_ua_vendor '
+                  'spoofed=$waf_ua_is_spoofed';
+
+# Example: drop obvious UA spoofing at the edge (config decides, not the module)
+if ($waf_ua_is_spoofed) { return 403; }
+```
+
+> **Operator caveat (advisory variable):** do **not** gate authentication/access
+> decisions on `$waf_ua_is_spoofed` on plain-HTTP or untrusted-`X-Forwarded-For`
+> deployments. The CIDR half is only trustworthy behind a correctly-configured
+> `set_real_ip_from`/trusted-proxy (it shares the exact trust boundary as the
+> existing fake-bot block, CWE-290); the JA4 half (HTTPS-only) is the unforgeable
+> one. Known UA-only blind spots: Brave/Arc (Chrome-identical UA), and
+> iPadOS/visionOS desktop-Safari masquerade.
 
 ### Detect mode & config-level blocking
 
