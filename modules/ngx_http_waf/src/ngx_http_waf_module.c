@@ -485,6 +485,29 @@ ngx_http_waf_postread_handler(ngx_http_request_t *r)
         }
     }
 
+#if (NGX_HTTP_SSL)
+    /*
+     * Copy the per-connection JA4 (computed by the ClientHello callback at TLS
+     * handshake, before any HTTP phase) into ctx HERE at POST_READ -- the
+     * earliest phase -- so every later phase sees it, including REWRITE-phase
+     * consumers of $waf_ua_is_spoofed (e.g. `if ($waf_ua_is_spoofed)`). Points
+     * at the ex-data ngx_str_t (no copy); ctx->ja4.len 0 stays = no TLS ->
+     * JA4 spoof half is inert. waf_ua_parse.c never sees the static ssl index.
+     */
+    if (ngx_http_waf_ja4_ssl_index >= 0
+        && r->connection->ssl != NULL
+        && r->connection->ssl->connection != NULL)
+    {
+        ngx_str_t  *ja4j;
+
+        ja4j = SSL_get_ex_data(r->connection->ssl->connection,
+                               ngx_http_waf_ja4_ssl_index);
+        if (ja4j != NULL && ja4j->len != 0) {
+            ctx->ja4 = *ja4j;
+        }
+    }
+#endif
+
     return NGX_DECLINED;
 }
 
@@ -996,30 +1019,27 @@ ngx_http_waf_preaccess_handler(ngx_http_request_t *r)
      */
     ngx_http_waf_ua_classify(r, wlcf, ctx);
 
-#if (NGX_HTTP_SSL)
-    /*
-     * Copy the per-connection JA4 (computed by the ClientHello callback before
-     * any phase handler runs) into ctx so waf_ua_parse.c can read it without
-     * seeing the file-static ssl ex-data index. Point at the ex-data ngx_str_t
-     * (no copy); ctx->ja4.len 0 stays = no TLS -> JA4 spoof half is inert.
-     */
-    if (ngx_http_waf_ja4_ssl_index >= 0
-        && r->connection->ssl != NULL
-        && r->connection->ssl->connection != NULL)
-    {
-        ngx_str_t  *ja4j;
-
-        ja4j = SSL_get_ex_data(r->connection->ssl->connection,
-                               ngx_http_waf_ja4_ssl_index);
-        if (ja4j != NULL && ja4j->len != 0) {
-            ctx->ja4 = *ja4j;
-        }
-    }
-#endif
-
     /* UA distribution over every reputation-passed (classified) request */
     if (sh != NULL && (ngx_uint_t) ctx->ua < WAF_UA_MAX) {
         (void) ngx_atomic_fetch_add(&sh->http_ua[ctx->ua], 1);
+    }
+
+    /*
+     * Descriptive-UA category distribution + spoof rate. Only computed when the
+     * status zone is live: the parse + spoof eval are otherwise lazy (run on
+     * first $waf_ua_* access), so a deployment using neither the variables nor
+     * waf_status keeps paying nothing here. Once per main request.
+     */
+    if (sh != NULL) {
+        ngx_http_waf_ua_parse(r, wlcf, ctx);        /* sets ctx->ua_category */
+        ngx_http_waf_ua_spoof_eval(r, wlcf, ctx);   /* sets ctx->is_spoofed  */
+
+        if ((ngx_uint_t) ctx->ua_category < WAF_CAT_MAX) {
+            (void) ngx_atomic_fetch_add(&sh->http_ua_cat[ctx->ua_category], 1);
+        }
+        if (ctx->is_spoofed) {
+            (void) ngx_atomic_fetch_add(&sh->http_ua_spoofed, 1);
+        }
     }
 
     if (wlcf->bot_block

@@ -83,6 +83,8 @@ typedef struct {
     ngx_atomic_t  http_resp_444;
     ngx_atomic_t  http_resp_429;
     ngx_atomic_t  http_ua[WAF_UA_MAX];
+    ngx_atomic_t  http_ua_cat[WAF_CAT_MAX];          /* $waf_ua_category dist  */
+    ngx_atomic_t  http_ua_spoofed;                   /* $waf_ua_is_spoofed == 1 */
     ngx_atomic_t  flag_blocked[WAF_FLAG_SLOTS];
 
     /* STREAM (L4) global verdict counters */
