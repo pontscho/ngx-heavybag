@@ -53,4 +53,13 @@ else
     echo "rate-limit unit test COMPILE FAILED"; rc=1
 fi
 
+# ---- geo radix-trie walk core --------------------------------------------
+BIN_GEO="$TMP/heavybag-test-geo"
+if "$CC" -DHEAVYBAG_GEO_UNIT_TEST $COMMON "$DIR/test-geo.c" -o "$BIN_GEO"; then
+    echo "== geo trie core =="
+    "$BIN_GEO" "$@" || rc=1
+else
+    echo "geo unit test COMPILE FAILED"; rc=1
+fi
+
 exit $rc

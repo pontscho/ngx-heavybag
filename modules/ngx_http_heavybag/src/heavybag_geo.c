@@ -8,12 +8,20 @@
 
 #include "heavybag_geo.h"
 
+#ifndef HEAVYBAG_GEO_UNIT_TEST
+
 #include <sys/mman.h>
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
 #include <openssl/err.h>
+
+#else
+
+#include <netinet/in.h>   /* sockaddr_in/in6, IN6_IS_ADDR_V4MAPPED, AF_INET[6] */
+
+#endif
 
 
 /*
@@ -50,6 +58,7 @@
  * A key rotation (multi-year horizon) requires rebuilding this module. The
  * key is a NUL-terminated string literal, loaded via BIO_new_mem_buf(key,-1).
  */
+#ifndef HEAVYBAG_GEO_UNIT_TEST
 static const char  ngx_http_heavybag_geo_signing_key[] =
 "-----BEGIN PUBLIC KEY-----\n"
 "MIGbMBAGByqGSM49AgEGBSuBBAAjA4GGAAQB1PzZdV9DE59LVCdXy/9cRgvTy9lx\n"
@@ -57,6 +66,7 @@ static const char  ngx_http_heavybag_geo_signing_key[] =
 "ir3y2n7XXyiVGIzTHrA6Tw7SG+H9LzuIl0wCg6s6svnXVDyho7b0tSZPUGKMI28q\n"
 "CUXef0jvZ9+ncTiJh1w=\n"
 "-----END PUBLIC KEY-----\n";
+#endif
 
 
 /* big-endian 32-bit read */
@@ -68,6 +78,7 @@ ngx_http_heavybag_geo_u32(const u_char *p)
 }
 
 
+#ifndef HEAVYBAG_GEO_UNIT_TEST
 static void
 ngx_http_heavybag_geo_cleanup(void *data)
 {
@@ -78,6 +89,7 @@ ngx_http_heavybag_geo_cleanup(void *data)
         db->map = NULL;
     }
 }
+#endif
 
 
 /*
@@ -107,6 +119,7 @@ ngx_http_heavybag_geo_u16(const u_char *p)
  *
  * The caller guarantees size >= NGX_HTTP_HEAVYBAG_GEO_DATA_OFF (pre-mmap guard).
  */
+#ifndef HEAVYBAG_GEO_UNIT_TEST
 static ngx_int_t
 ngx_http_heavybag_geo_verify(ngx_conf_t *cf, ngx_str_t *full,
     const u_char *base, size_t size)
@@ -390,6 +403,7 @@ ngx_http_heavybag_geo_open(ngx_conf_t *cf, ngx_str_t *path)
 
     return db;
 }
+#endif /* HEAVYBAG_GEO_UNIT_TEST */
 
 
 /* address -> network leaf index, or -1. IPv6 / generic bit walk. */
