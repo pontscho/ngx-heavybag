@@ -756,6 +756,19 @@ ngx_http_heavybag_finalize_decision(ngx_http_request_t *r, ngx_http_heavybag_ctx
                 v = ngx_http_heavybag_stat_vhost(sh, idx);
                 (void) ngx_atomic_fetch_add(&v->allowed, 1);
             }
+
+            /*
+             * lifecycle-02: a detect would-block is accounted as allowed, so
+             * the per-country slot must see it too -- total++ (blocked=0),
+             * mirroring the enforce path's cc_bump(...,1) and the allowed:
+             * label. ctx->geo_done means the reputation geo lookup produced a
+             * country (set == verdict.geo_valid before this point); cc16==0
+             * ({0,0} unknown) makes cc_bump a no-op for geo-less requests.
+             */
+            if (ctx->geo_done) {
+                ngx_http_heavybag_stat_cc_bump(sh,
+                    (uint16_t) ((ctx->country[0] << 8) | ctx->country[1]), 0);
+            }
         }
 
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
