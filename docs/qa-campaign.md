@@ -348,3 +348,27 @@ The six P2 backlog items (all `low`/`latent`, **none attacker-triggerable** with
 **Not committed:** partner commits on main + pushes himself. Harness untracked under `.claude/tmp/reverify2/`.
 
 **Out of scope (unchanged):** the 142-vector regression matrix (incl. dedicated rate/match unit harnesses) — the every-shipped-pattern ReDoS-positive sweep is that round's job; this round proved a representative positive set never clips. Deep-fuzz of the critic's un-probed surfaces (authhttp SMTP, spoof self-swap, reputation precedence, stat_cc saturation).
+
+### Fix round 3 — lifecycle-02 (detect per-country accounting) — COMPLETED 2026-06-17
+
+The last remaining `low`/observability backlog item. **No attacker impact** — pure metrics honesty.
+
+| ID | Theme | Fix | Verification |
+|---|---|---|---|
+| `lifecycle-02` | observability | In HTTP DETECT mode a would-be-blocked request exited via `return NGX_DECLINED` from `ngx_http_heavybag_finalize_decision` BEFORE reaching any of the 11 per-stage `cc_bump(...,1)` call sites or the `allowed:` label's `cc_bump(...,0)` — so the per-country slot got **zero** credit for the request, even though (since the round-1 observability-01 fix) the global `http_allowed` WAS bumped. Fix: in the detect branch of `finalize_decision` (module.c ~760-771), inside the existing `if (sh != NULL && count)` count-once block, add `if (ctx->geo_done) cc_bump(sh, (cc16 from ctx->country), 0)` — `total++`, `blocked` unchanged. The geo result is read from `ctx` (set == `verdict.geo_valid` before the first finalize call), following the function's own "re-resolve from r, don't thread through callers" design (the comment at module.c:712 already states sh/idx are re-resolved this way). No signature change, no call-site churn. | build clean -Werror (SSL `.so` rebuilt via `make -f objs/Makefile modules`, OpenSSL not rebuilt, md5 build==deploy, `nginx -t` binary-compatible); **runtime 7/7 PASS** live nginx |
+
+**Model decision:** a detect would-block is accounted as *allowed* (it proceeds), consistent with the round-1 observability-01/-04 fixes — so the per-country bump is `cc_bump(...,0)` (`total++` only), NOT `blocked++`. This matches the **already-correct STREAM head**, which has always called `cc_bump(sh, cc16, denied)` unconditionally with `denied==0` in detect (heavybag_stream.c:253,257,289-291). The HTTP head was the only one with the gap (its `cc_bump` is scattered across per-stage block paths that the detect early-return skipped); this fix brings HTTP into line with stream. The `would_block`-per-country alternative was rejected: it needs a new field in `ngx_http_heavybag_stat_cc_t` → shm-layout change (version-guard, open-addressed cc table) — disproportionate for a `low` item.
+
+**Files touched:** `ngx_http_heavybag_module.c` (one 4-line block in `finalize_decision`).
+
+**Runtime re-verification (live sandbox nginx, SSL `.so` mtime 13:26, binary-compatible):** harness under `.claude/tmp/reverify-lc02/` (lc02.conf + run.sh). Geo resolved via `waf_trusted_proxy 127.0.0.1/32` + spoofed `X-Forwarded-For` against the project's own `geodb/location.db` (oracle `reference/geolookup.c`: 185.177.72.1→FR, 1.1.1.1→AU, 8.8.8.8→US). **7/7 assertions PASS:**
+
+| Scenario | Setup | Observed |
+|---|---|---|
+| **lifecycle-02 fix** — detect would-block bumps per-country total | `waf detect`, scanner `/.env` ×3, XFF=185.177.72.1 (FR) | `country FR total Δ=3`, `blocked Δ=0` — detect would-blocks now visible per-country |
+| control — enforce block bumps total AND blocked | `waf on`, scanner `/.env` ×3, XFF=1.1.1.1 (AU) | `country AU total Δ=3`, `blocked Δ=3` — enforce path unchanged; cc table + geo resolution proven real |
+| control — allowed request bumps total only | `waf on`, `/index.html` ×2, XFF=8.8.8.8 (US) | `country US total Δ=2`, `blocked Δ=0` — allowed: path correct |
+
+Error log clean (no WAF errors, no crashes, no alloc failures, clean worker exit). Harness untracked under `.claude/tmp/`.
+
+**Not committed:** partner commits on main + pushes himself.
