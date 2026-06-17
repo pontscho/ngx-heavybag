@@ -44,4 +44,13 @@ else
     echo "UA parser unit test COMPILE FAILED"; rc=1
 fi
 
+# ---- rate-limit token-bucket core ----------------------------------------
+BIN_RATE="$TMP/heavybag-test-rate"
+if "$CC" -DHEAVYBAG_RATE_UNIT_TEST $COMMON "$DIR/test-rate.c" -o "$BIN_RATE"; then
+    echo "== rate-limit core =="
+    "$BIN_RATE" "$@" || rc=1
+else
+    echo "rate-limit unit test COMPILE FAILED"; rc=1
+fi
+
 exit $rc

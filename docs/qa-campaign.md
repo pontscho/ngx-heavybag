@@ -372,3 +372,40 @@ The last remaining `low`/observability backlog item. **No attacker impact** — 
 Error log clean (no WAF errors, no crashes, no alloc failures, clean worker exit). Harness untracked under `.claude/tmp/`.
 
 **Not committed:** partner commits on main + pushes himself.
+
+---
+
+## Test-matrix round (permanent regression net for the 142-vector backlog)
+
+The Discovery campaign found **zero** attacker-triggerable corruption/crash/bypass but surfaced one structural gap: 9 of 11 TUs had no unit tests, and the three fix rounds were re-verified only ad-hoc. This round codifies the 142 code-grounded vectors as a permanent regression net, closing the untested-TU gap. Partner decision (2026-06-17): full 142, all three layers (unit / integration / build), multi-session, check-in between phases; partner commits source+tests on `main` and pushes.
+
+Isolation pattern: each pure-core TU is `#include`d directly under a `-DHEAVYBAG_<TU>_UNIT_TEST` flag; an `#ifdef` shim block substitutes the nginx typedefs/macros **byte-for-byte** (`NGX_OK 0`/`NGX_ERROR -1`/`NGX_AGAIN -2`/`NGX_BUSY -3`/`NGX_DECLINED -5`), the nginx-coupled tail (config parsers, slab, mmap, filter chain) sits behind `#ifndef`. The real `-Werror` SSL `objs/` build (`make -f objs/Makefile modules`, md5 build==deploy, `nginx -t`) is the correctness contract — a divergent shim would make the net lie.
+
+### Phase 1 — `rate.c` unit (16 vectors) — COMPLETED 2026-06-17
+
+New `tests/unit/test-rate.c` (suite `rate`); guard additions to `heavybag_rate.h` (include-gate + `u_char`/`ngx_int_t`/`ngx_uint_t`/`ngx_atomic_t`/`ngx_atomic_uint_t`/`ngx_msec_t` shim, all 64-bit so the packed-state CAS + ~49-day msec wrap hit the production boundary) and `heavybag_rate.c` (runtime-symbol shim: `__sync` atomics, writable `ngx_current_msec`, no-op `ngx_log_error` + zeroed `ngx_cycle`; `rule_select`/`rule_add`/`init_zone` gated behind `#ifndef`). The table is a flat `calloc` `[hdr][slot×nslots]`; the private slot/hdr structs and the `static` FNV key fn are reachable because the test includes the `.c`.
+
+| # | Vector | Assertion |
+|---|---|---|
+| V1 | `burst_fp==0` (round-2 guard) | fail-open `NGX_OK` + one-shot ALERT path exercised |
+| V2 | `period_ms==0` (round-2 div-by-zero guard) | fail-open `NGX_OK`, no SIGFPE |
+| V3 | NULL shm | fail-open `NGX_OK` |
+| V4 | `nslots==0` | fail-open `NGX_OK` |
+| V5 | unsupported family (AF_UNIX) | `key()==0` → fail-open `NGX_OK` |
+| V6 | NULL sockaddr | `key(NULL)==0` → fail-open `NGX_OK` |
+| V7 | exact burst boundary | Nth allow / (N+1)th deny `== NGX_BUSY` (-3) |
+| V8 | sub-ms refill rounds to 0 | tokens unchanged AND stamp preserved (anti-drift) |
+| V9 | 49-day uint32 msec wrap mid-bucket | wrap-safe elapsed → small refill, not 2^32 |
+| V10 | clock skewed backwards | uint32 underflow → refill to burst, never stuck/UB |
+| V11 | FNV key-equality gating | colliding probe does not mutate the victim's bucket |
+| V12 | v4-mapped IPv6 == native IPv4 | identical key |
+| V13 | native IPv6 /64 keying | same /64 → same key; different /64 → different key |
+| V14 | FNV key never 0 (sentinel) | 200k-IP sweep, always nonzero |
+| V15 | probe window full (32) | evict OLDEST, fresh full bucket, `rate_overflow==0` |
+| V16 | max rate/burst (P6 bound) | non-overflowing 64-bit refill + lossless uint32 downcast at elapsed=0xffffffff |
+
+**Honest out-of-unit-scope** (documented in test-rate.c header, NOT faked): CAS-starvation fail-open (multi-worker only; covered by the `CAS_MAX` bound + integration/stress); `waf_rate` zone `MIN_SLOTS` back-off (in `init_zone`, slab-coupled → config/integration layer); exact `hash==0` remap (2^-64, not brute-forceable → asserted as the always-nonzero invariant in V14).
+
+**Verification:** `run-unit-tests.sh` exit 0 — rate 16/16, JA4 7/7, UA 36/36 (regressions clean). Real SSL `objs/` rebuild clean `-Werror` (zero warnings), md5 build==deploy `dd921b76ac212755da40cda71e2dd7f1`, `nginx -t` binary-compatible. No production logic changed (guards take the original branch in the no-`-D` build).
+
+**Not committed:** partner commits source+tests on main + pushes himself.
