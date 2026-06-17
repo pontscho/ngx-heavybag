@@ -409,3 +409,41 @@ New `tests/unit/test-rate.c` (suite `rate`); guard additions to `heavybag_rate.h
 **Verification:** `run-unit-tests.sh` exit 0 — rate 16/16, JA4 7/7, UA 36/36 (regressions clean). Real SSL `objs/` rebuild clean `-Werror` (zero warnings), md5 build==deploy `dd921b76ac212755da40cda71e2dd7f1`, `nginx -t` binary-compatible. No production logic changed (guards take the original branch in the no-`-D` build).
 
 **Not committed:** partner commits source+tests on main + pushes himself.
+
+### Phase 2 — `geo.c` unit (20 vectors) — COMPLETED 2026-06-17
+
+The highest-risk class (libloc on-disk byte layout). MANDATED header-split applied to the shared `heavybag_geo.h` (included by 4 production TUs: geo.c, reputation.c, status.c, module.c), following the `heavybag_rate.h`/`heavybag_ja4.h` pattern:
+
+- **`heavybag_geo.h`** restructured into three regions: (1) a type-provider block — `#ifndef HEAVYBAG_GEO_UNIT_TEST` → `#include "ngx_http_heavybag.h"`, `#else` → a tiny byte-mirroring shim (`u_char`/`ngx_int_t`/`ngx_uint_t`/`ngx_str_t` + `ngx_inline`, all derived from `<stddef.h>`/`<stdint.h>`); (2) the SHARED section — block-index + per-network-flag macros and the `geo_db_t`/`geo_result_t` structs (they reference only shimmable types, so the unit test can build a synthetic in-memory db); (3) the production-only prototypes (`geo_open`/`geo_lookup`, `ngx_conf_t`/`struct sockaddr` coupled) behind `#ifndef`. The on-disk layout constants are NEVER duplicated into the shim — a divergent copy would silently drift from the real layout the walk depends on.
+- **`heavybag_geo.c`** gated: top includes (`<sys/mman.h>` + OpenSSL → `#ifndef`; `<netinet/in.h>` for sockaddr/IN6_IS_ADDR_V4MAPPED/AF_* → `#else`); the signing-key static, `geo_cleanup` (munmap), `geo_verify` (OpenSSL ECDSA-P521), and `geo_open` (ngx_conf_t/mmap) all behind `#ifndef HEAVYBAG_GEO_UNIT_TEST`. The `u32`/`u16` big-endian readers, the radix-trie `geo_walk` (static), and `geo_lookup` stay ungated — they ARE the production code under test (12-byte ND-leaf with **flags at offset 8**, the `(size_t)net*12+12 > block_len[ND]` bound, the `off+12 > ntlen` node bound), never re-declared.
+
+New `tests/unit/test-geo.c` (suite `geo`) includes `heavybag_geo.c` directly under `-DHEAVYBAG_GEO_UNIT_TEST`; hand-built 12-byte tree nodes (`[bit0-child | bit1-child | net]`, `net & 0x80000000` = internal) and 12-byte leaves (`[cc | rsv | asn | flags | rsv]`) drive `geo_walk`/`geo_lookup`. Both are reachable because the test includes the `.c`.
+
+| # | Vector | Assertion |
+|---|---|---|
+| V1 | v4 native leaf decode | country + ASN read from the matched leaf, found=1 |
+| V2 | flags at ND offset 8 (libloc landmine) | flags from `[8,10)`; poison `0xDEAD`@`[2,4)` / `0xBEEF`@`[10,12)` NOT read; ASN intact |
+| V3 | `::ffff:1.2.3.4` (v4-mapped) == native v4 | identical leaf via `ipv4root` (distinct subtree, genuinely walked) |
+| V4 | `::1.2.3.4` (v4-COMPATIBLE, not mapped) | full 16-byte v6 walk from node 0, does NOT see the v4 tree's leaf |
+| V5 | genuine AF_INET6 (`8000::`) | 16-byte path, bit0==1 right-child branch; `::` → no-match |
+| V6 | all-zero `::` & `0.0.0.0` | root leaf matched at depth 0 |
+| V7 | `/0` default | non-zero address falls back to the root leaf |
+| V8 | longest-prefix | a deeper leaf supersedes the `/0` leaf; sibling stays default |
+| V9 | internal sentinel node | `net & 0x80000000` not recorded as a leaf; sentinel-only path → no-match |
+| V10 | `/32` host leaf max v4 depth | reached only after all 32 bits; flip last bit → no-match |
+| V11 | `/128` host leaf max v6 depth | reached only after all 128 bits; flip last bit → no-match |
+| V12 | ND-leaf bound off-by-one | last leaf (`end==block_len`) accepted; index one past rejected (found=0) |
+| V13 | NT-node bound off-by-one | node at exact `block_len` walkable; child one node past → walk -1, no over-read |
+| V14 | leaf index near UINT32_MAX | `net=0x7FFFFFFF` → `(size_t)net*12+12` rejects, no 32-bit multiply wrap |
+| V15 | child index near UINT32_MAX | `nxt=0xFFFFFFFE` → `off+12 > ntlen` rejects in size_t, no wrap/over-read |
+| V16 | self-referential child | node1 bit0-child → node1; bounded by addrlen (≤32 iters), terminates, no hang |
+| V17 | single-node tree (`block_len[NT]==12`) | leaf-root matches; internal-only root → no-match; no boundary over-read |
+| V18 | AF_UNIX / unknown family | clean no-match, no walk |
+| V19 | NULL db & NULL sockaddr | clean no-match, no crash |
+| V20 | MSB-first bit direction | bit0 = MSB of byte 0: `0.0.0.0`→left leaf, `128.0.0.0`→right leaf |
+
+**Honest out-of-unit-scope** (documented in test-geo.c header, NOT faked): the config-time `geo_open`/`geo_verify` path is behind `#ifndef` and needs `ngx_conf_t` + mmap + an ECDSA-P521/SHA-512-signed `location.db` + OpenSSL — magic check, mandatory signature verify, `size < DATA_OFF` / `> MAX_SIZE` rejection, block `offset+len > EOF` rejection, the 96-level descent to the IPv4-mapped root, and all-zero-FILE fail-closed (magic mismatch). These are covered by the **Fix-round-3 LIVE nginx test** (real FR/AU/US ground-truth lookups against the project's signed `geodb/location.db`, oracle `reference/geolookup.c`) and the config-build layer; they cannot be unit tested without nginx+OpenSSL.
+
+**Verification:** `run-unit-tests.sh` exit 0 — **geo 20/20**, rate 16/16, JA4 7/7, UA 36/36 (regressions clean). The header touches 4 production TUs → verified byte-transparent: SSL `objs/` rebuild clean `-Werror` (zero warnings, all 4 includer TUs compile silently), md5 build==deploy `c1ddfa3b4772403e8331f843034be16d`, `nginx -t` binary-compatible; the `objs-nossl` and `objs-nostream` permutation trees also compile `heavybag_geo.c` clean. The `.so` md5 changed from Phase 1's `dd921b76…` to `c1ddfa3b…` due only to `__LINE__`/debug-info shift from the added `#ifndef` lines — the production preprocessed token stream is unchanged (the guards take the nginx branch in the no-`-D` build). No production logic changed.
+
+**Not committed:** partner commits source+tests on main + pushes himself.
