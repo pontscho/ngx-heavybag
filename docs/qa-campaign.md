@@ -483,3 +483,35 @@ Three suites added to `tests/unit/test_heavybag_ua_parse.c`:
 **Verification:** `run-unit-tests.sh` exit 0 — **UA 57/57** (was 36; +21), rate 16/16, JA4 7/7, geo 20/20 (regressions clean). Test-file-only change: no production source edited, no module rebuild, deployed SSL `.so` md5 `c1ddfa3b4772403e8331f843034be16d` (unchanged from Phase 2, build==deploy). The unit harness compiles the UA core with `-Wall` clean (no extra libs).
 
 **Not committed:** partner commits source+tests on main + pushes himself.
+
+### Phase 4 — `ja4` core extend (17 vectors) — COMPLETED 2026-06-17
+
+The pure JA4 core (`ngx_http_heavybag_ja4_build`, in `heavybag_ja4.c`) already had a 7-case suite (FoxIO canonical vector, GREASE filtering, ALPN hex fallback, no-ALPN/QUIC, the two `ja4-01` empty-list canonicalizations, cipher count clamp). This phase adds the **WF-3 ja4-fuzz backlog** as a byte-level robustness + canonical-semantics net, driving `ngx_http_heavybag_ja4_build()` directly (already isolated under `-DHEAVYBAG_JA4_UNIT_TEST`, includes `heavybag_ja4.c`, links `-lcrypto` for SHA256). **No header split** (the core is already nginx-free behind the existing guard) and **no production source touched** — test-file-only. Assertions are STRUCTURAL/RELATIVE (two builds compared, or fixed byte offsets in the 37-char JA4 string) so no hand-computed SHA256 literal is needed — mirroring the existing `grease_is_filtered` style.
+
+JA4 string layout pinned by the offsets: `[0]` proto `t|q`, `[1..2]` version, `[3]` SNI `d|i`, `[4..5]` cipher count, `[6..7]` ext count, `[8..9]` ALPN, `[10]` `_`, `[11..22]` JA4_b (cipher hash), `[23]` `_`, `[24..35]` JA4_c (ext+sigalg hash).
+
+| # | Test | Vector | Assertion |
+|---|---|---|---|
+| V1 | `ext_count_clamp_99` | 150 non-GREASE exts | ext count field (`[6..7]`) clamps to `"99"` (the `next>99` clamp), mirrors the cipher-side clamp |
+| V2 | `max_elems_hash_clamp` | 257 vs 256 ascending ciphers | `HEAVYBAG_JA4_MAX_ELEMS` (256) keeps the first 256 in input order before sort → JA4_b byte-identical to the 256-prefix; no over-read |
+| V3 | `cipher_order_independent` | shuffled cipher list | ciphers sorted before hashing → fingerprint order-invariant (fwd == rev) |
+| V4 | `ext_order_independent` | shuffled ext list | exts sorted before hashing → JA4_c order-invariant |
+| V5 | `sigalg_order_preserved` | reversed sigalgs | **the behavioral pin:** sigalgs kept in ORIGINAL order → JA4_c differs while JA4_a+`_`+JA4_b (`memcmp 23`) stay byte-identical |
+| V6 | `duplicate_ext_types_kept` | `{0x0005}` vs `{0x0005,0x0005}` | no de-dup: count `01`→`02`, JA4_c differs |
+| V7 | `duplicate_ciphers_kept` | `{0x1301}` vs `{0x1301,0x1301}` | no de-dup: count `01`→`02`, JA4_b differs |
+| V8 | `all_grease_cipher_and_ext` | all-GREASE ciphers AND exts | counts `00`/`00`, SNI `i`, JA4_b and JA4_c both the canonical literal `000000000000` |
+| V9 | `alpn_zero_len_is_00` | non-NULL ALPN ptr, `alpn_len==0` | field `"00"` (the `len==0` guard, not the NULL guard) |
+| V10 | `alpn_leading_nul_hex_escaped` | ALPN `{0x00,'h'}` | leading NUL non-alnum → hex `"08"` (high nibble of `0x00`, low nibble of `'h'`) |
+| V11 | `alpn_interior_nul_transparent` | ALPN `{'h',0x00,'2'}` | only first/last byte drive the field → `"h2"` (interior NUL transparent, length-driven) |
+| V12 | `alpn_single_byte` | ALPN `{'x'}` len 1 | `alpn[0]==alpn[len-1]` → `"xx"` |
+| V13 | `version_codes_legacy` | 0x0302 / 0x0301 / 0x0300 | TLS1.1 `"11"`, TLS1.0 `"10"`, SSL3.0 `"s3"` |
+| V14 | `version_codes_dtls_and_unknown` | 0xfeff/0xfefd/0xfefc/0x9999 | DTLS `d1`/`d2`/`d3`, unrecognised → `"00"` fallback |
+| V15 | `sni_presence_byte` | ext 0x0000 present vs absent | byte `[3]` `'d'` vs `'i'` |
+| V16 | `sni_alpn_counted_excluded_from_hash` | `{SNI,ALPN,0x000d}` vs `{0x000d}` | SNI(0x0000)+ALPN(0x0010) COUNTED in `[6..7]` (`03` vs `01`) but EXCLUDED from JA4_c → hash identical |
+| V17 | `null_out_returns_error` | `out==NULL` | returns `-1`, no write (the core's one hard error) |
+
+**Honest out-of-unit-scope** (documented in the test header, NOT faked → Phase 6b wire-walk): the inner-length-lying-past-body clamps for `supported_versions`/`signature_algorithms`/ALPN, the odd-trailing-byte / dangling-half-entry drops, and the 2-byte-per-cipher wire parse all live in `ngx_http_heavybag_ja4_compute()` behind `#if (NGX_HTTP_SSL)` — they parse raw `SSL_client_hello_*` getters into the arrays this core consumes, and require a live `SSL*`. The pure core's contract (it trusts the parsed arrays + their counts and canonicalizes deterministically) is exactly what V1–V17 pin; the extractor's length-clamping is the Phase 6b SSL-harness job. `SSL_is_quic` likewise is extractor-only (the core takes `is_quic` as a parameter — covered by the existing `no_alpn_and_quic` case).
+
+**Verification:** `run-unit-tests.sh` exit 0 — **JA4 24/24** (was 7; +17), rate 16/16, geo 20/20, UA 57/57 (regressions clean). Test-file-only change: no production source edited, no module rebuild, deployed SSL `.so` md5 `c1ddfa3b4772403e8331f843034be16d` (unchanged from Phase 2/3, build==deploy). Build+test via p:minion-builder.
+
+**Not committed:** partner commits source+tests on main + pushes himself.
