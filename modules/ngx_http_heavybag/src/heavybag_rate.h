@@ -18,10 +18,36 @@
 #define _HEAVYBAG_RATE_H_INCLUDED_
 
 
+#ifndef HEAVYBAG_RATE_UNIT_TEST
+
 #include <ngx_config.h>
 #include <ngx_core.h>
 
 #include "heavybag_rep.h"   /* ngx_http_heavybag_verdict_t for the rule selector */
+
+#else
+
+/*
+ * Standalone unit-test shim (-DHEAVYBAG_RATE_UNIT_TEST): substitute nginx for
+ * the pure token-bucket core, NO nginx/SSL headers. Every typedef mirrors
+ * nginx byte-for-byte -- the shim REPLACES nginx, it never redefines its
+ * semantics; the real -Werror SSL module build stays the correctness
+ * contract. ngx_atomic_t and ngx_msec_t are 64-bit so the packed-state CAS
+ * and the ~49-day msec wrap hit the same boundary as production. The
+ * runtime-symbol shim (atomics, ngx_current_msec, log/cycle) lives in
+ * heavybag_rate.c.
+ */
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/socket.h>      /* struct sockaddr for ngx_http_heavybag_rate_check */
+typedef unsigned char  u_char;
+typedef intptr_t       ngx_int_t;
+typedef uintptr_t      ngx_uint_t;
+typedef uint64_t       ngx_atomic_t;
+typedef uint64_t       ngx_atomic_uint_t;
+typedef uint64_t       ngx_msec_t;
+
+#endif
 
 
 /* fixed-point scale: 1 token == HEAVYBAG_RATE_SCALE internal units */
@@ -41,12 +67,14 @@
  * added = elapsed_ms * rate_num_fp / period_ms, computed in 64-bit with the
  * division last; the bounds make the product provably non-overflowing.
  */
+#ifndef HEAVYBAG_RATE_UNIT_TEST
 typedef struct {
     uint64_t      rate_num_fp;   /* tokens-per-period numerator * SCALE   */
     ngx_uint_t    period_ms;     /* 1000 (/s) | 60000 (/m) | 3600000 (/h) */
     ngx_uint_t    burst_fp;      /* bucket capacity in SCALE units        */
     ngx_array_t  *geo_cc;        /* packed uint16 CC list; NULL = default  */
 } ngx_http_heavybag_rate_rule_t;
+#endif
 
 
 /*
@@ -58,6 +86,8 @@ typedef struct {
  */
 ngx_int_t ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
     uint64_t rate_num_fp, ngx_uint_t period_ms, ngx_uint_t burst_fp);
+
+#ifndef HEAVYBAG_RATE_UNIT_TEST
 
 /*
  * Pick the rule for *verdict from *rules: the first for_geo rule whose CC list
@@ -78,6 +108,8 @@ char *ngx_http_heavybag_rate_rule_add(ngx_conf_t *cf, ngx_array_t **rules);
 
 /* shm init callback for the waf_rate zone (user-sized; HTTP head installs it) */
 ngx_int_t ngx_http_heavybag_rate_init_zone(ngx_shm_zone_t *shm_zone, void *data);
+
+#endif /* HEAVYBAG_RATE_UNIT_TEST */
 
 /* table-saturation drop count (eviction-CAS failures); 0 when shm is NULL */
 ngx_atomic_uint_t ngx_http_heavybag_rate_overflow(void *shm);

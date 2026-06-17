@@ -19,10 +19,57 @@
  * The packed CAS requires a >= 64-bit atomic word; see the guards below.
  */
 
+#ifndef HEAVYBAG_RATE_UNIT_TEST
+
 #include <ngx_config.h>
 #include <ngx_core.h>
 
 #include "heavybag_rate.h"
+
+#else
+
+/* ===================================================================== *
+ *  Standalone unit-test shim (-DHEAVYBAG_RATE_UNIT_TEST)                  *
+ *                                                                        *
+ *  Substitutes nginx for the pure token-bucket core. Every macro/typedef *
+ *  mirrors nginx byte-for-byte (build/.../src/core/ngx_core.h): the shim *
+ *  REPLACES nginx, it never redefines its semantics -- the real -Werror  *
+ *  SSL module build is the only correctness contract. test-rate.c        *
+ *  includes this .c directly, so the static slot/header structs and the  *
+ *  static key/check core are reachable; rule_select/rule_add/init_zone   *
+ *  (ngx_conf_t / ngx_array_t / slab coupled) stay behind #ifndef.        *
+ * ===================================================================== */
+#include <netinet/in.h>      /* sockaddr_in/in6, IN6_IS_ADDR_V4MAPPED */
+#include "heavybag_rate.h"   /* type shim: u_char/ngx_*_t/ngx_atomic_t/ngx_msec_t */
+
+#define NGX_PTR_SIZE    8
+#define NGX_HAVE_INET6  1
+
+#define NGX_OK          0
+#define NGX_ERROR     (-1)
+#define NGX_AGAIN     (-2)
+#define NGX_BUSY      (-3)
+#define NGX_DECLINED  (-5)
+
+/* nginx atomics -> gcc/clang __sync builtins (identical return semantics) */
+#define ngx_atomic_cmp_set(lock, old, set)  __sync_bool_compare_and_swap(lock, old, set)
+#define ngx_atomic_fetch_add(value, add)    __sync_fetch_and_add(value, add)
+#define ngx_cpu_pause()
+
+/* the clock the vectors drive (nginx: volatile ngx_msec_t ngx_current_msec) */
+ngx_msec_t  ngx_current_msec;
+
+/* no-op log + zeroed cycle stub for the burst_fp==0 ALERT path (the macro
+ * discards the variadic format args; ngx_cycle->log stays a valid pointer) */
+#define NGX_LOG_ALERT  1
+typedef struct ngx_log_s   { ngx_uint_t log_level; } ngx_log_t;
+typedef struct ngx_cycle_s { ngx_log_t *log; }       ngx_cycle_t;
+static ngx_log_t    heavybag_ut_log;
+static ngx_cycle_t  heavybag_ut_cycle = { &heavybag_ut_log };
+static ngx_cycle_t *ngx_cycle = &heavybag_ut_cycle;
+#define ngx_log_error(level, log, err, ...)  ((void) (log))
+
+#endif
 
 
 #if (NGX_PTR_SIZE < 8)
@@ -259,6 +306,8 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
     return NGX_OK;                        /* CAS starvation -> fail-open */
 }
 
+
+#ifndef HEAVYBAG_RATE_UNIT_TEST
 
 ngx_http_heavybag_rate_rule_t *
 ngx_http_heavybag_rate_rule_select(ngx_array_t *rules, ngx_http_heavybag_verdict_t *verdict)
@@ -499,6 +548,8 @@ ngx_http_heavybag_rate_init_zone(ngx_shm_zone_t *shm_zone, void *data)
 
     return NGX_OK;
 }
+
+#endif /* HEAVYBAG_RATE_UNIT_TEST */
 
 
 ngx_atomic_uint_t
