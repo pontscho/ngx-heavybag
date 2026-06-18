@@ -13,7 +13,67 @@
 #define _HEAVYBAG_MATCH_H_INCLUDED_
 
 
+#ifndef HEAVYBAG_MATCH_UNIT_TEST
+
 #include "ngx_http_heavybag.h"
+
+#else
+
+/*
+ * Standalone unit-test type shim (-DHEAVYBAG_MATCH_UNIT_TEST): substitute
+ * nginx for the config-time scanner-list parser + the PCRE2 bucket core, NO
+ * nginx / SSL headers. Every typedef mirrors nginx byte-for-byte -- the shim
+ * REPLACES nginx, it never redefines its semantics; the real -Werror SSL
+ * module build stays the only correctness contract. ngx_regex_t is opaque
+ * (cast to pcre2_code* in heavybag_match.c, exactly as production does); the
+ * runtime-symbol shim (arena, ngx_array, ngx_regex_compile -> real
+ * pcre2_compile, config-log capture) lives in heavybag_match.c. The nginx-glue
+ * tail (ua_list/ja4/verified_bot/ua_classify) sits behind #ifndef both here
+ * and in the .c -- it needs an ngx_http_request_t / cidr_add / the ja4 table.
+ */
+#include <stddef.h>
+#include <stdint.h>
+
+typedef unsigned char  u_char;
+typedef intptr_t       ngx_int_t;
+typedef uintptr_t      ngx_uint_t;
+typedef struct { size_t len; u_char *data; } ngx_str_t;
+
+typedef struct ngx_pool_s   ngx_pool_t;    /* opaque: the test arena mallocs */
+typedef struct ngx_regex_s  ngx_regex_t;   /* opaque: cast to pcre2_code*     */
+
+typedef struct {
+    ngx_pool_t  *pool;
+    ngx_pool_t  *temp_pool;
+    void        *cycle;
+} ngx_conf_t;
+
+typedef struct {
+    void        *elts;
+    ngx_uint_t   nelts;
+    size_t       size;
+    ngx_uint_t   nalloc;
+    ngx_pool_t  *pool;
+} ngx_array_t;
+
+typedef struct {
+    ngx_str_t     pattern;
+    ngx_pool_t   *pool;
+    ngx_int_t     options;
+    ngx_str_t     err;
+    ngx_regex_t  *regex;
+} ngx_regex_compile_t;
+
+/* action bucket enum -- mirrors ngx_http_heavybag.h (the shim does not pull
+ * the module header): 404=0, 403=1, 444=2, MAX=3. */
+typedef enum {
+    HEAVYBAG_ACTION_404 = 0,
+    HEAVYBAG_ACTION_403,
+    HEAVYBAG_ACTION_444,
+    HEAVYBAG_ACTION_MAX
+} ngx_http_heavybag_action_e;
+
+#endif
 
 
 /*
@@ -35,6 +95,8 @@ ngx_int_t ngx_http_heavybag_scanner_compile(ngx_conf_t *cf, ngx_str_t *path,
  */
 ngx_int_t ngx_http_heavybag_scanner_lookup(ngx_regex_t **re_bucket,
     ngx_str_t *subject);
+
+#ifndef HEAVYBAG_MATCH_UNIT_TEST   /* nginx-glue tail: ngx_http_request_t / ja4 table / cidr_add */
 
 /*
  * Read and compile one config-file UA signature list into wlcf's ua_re[cat]
@@ -82,6 +144,8 @@ void ngx_http_heavybag_ua_classify(ngx_http_request_t *r,
  */
 ngx_int_t ngx_http_heavybag_ja4_list_compile(ngx_conf_t *cf,
     ngx_http_heavybag_loc_conf_t *wlcf, ngx_str_t *path);
+
+#endif /* HEAVYBAG_MATCH_UNIT_TEST -- nginx-glue tail */
 
 
 #endif /* _HEAVYBAG_MATCH_H_INCLUDED_ */

@@ -9,6 +9,9 @@
 #
 #   test-ja4.c                -> JA4 core            (needs -lcrypto for SHA256)
 #   test_heavybag_ua_parse.c  -> UA descriptive core (no extra libs)
+#   test-rate.c               -> token-bucket core   (no extra libs)
+#   test-geo.c                -> geo radix-trie core (no extra libs)
+#   test-match.c              -> scanner/match core  (needs -lpcre2-8, real engine)
 #
 # Usage:  bash run-unit-tests.sh [suite[:test]]
 # Exit 0 = all tests in all binaries passed.
@@ -60,6 +63,15 @@ if "$CC" -DHEAVYBAG_GEO_UNIT_TEST $COMMON "$DIR/test-geo.c" -o "$BIN_GEO"; then
     "$BIN_GEO" "$@" || rc=1
 else
     echo "geo unit test COMPILE FAILED"; rc=1
+fi
+
+# ---- scanner/match core (real PCRE2 match/depth-limit fix) ---------------
+BIN_MATCH="$TMP/heavybag-test-match"
+if "$CC" -DHEAVYBAG_MATCH_UNIT_TEST $COMMON "$DIR/test-match.c" -lpcre2-8 -o "$BIN_MATCH"; then
+    echo "== scanner/match core =="
+    "$BIN_MATCH" "$@" || rc=1
+else
+    echo "match unit test COMPILE FAILED"; rc=1
 fi
 
 exit $rc
