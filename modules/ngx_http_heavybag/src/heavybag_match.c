@@ -14,7 +14,160 @@
  * configuration reload re-reads the file and frees the old regex.
  */
 
+#ifndef HEAVYBAG_MATCH_UNIT_TEST
+
 #include "heavybag_match.h"
+
+#else
+
+/* ===================================================================== *
+ *  Standalone unit-test runtime shim (-DHEAVYBAG_MATCH_UNIT_TEST)         *
+ *                                                                        *
+ *  Substitutes nginx for the config-time list parser + the PCRE2 bucket  *
+ *  compile/exec core. REAL PCRE2 is linked (-lpcre2-8): the round-2       *
+ *  ReDoS match/depth-limit fix runs end-to-end against pcre2_match(),     *
+ *  never a mock -- a mocked engine would make the fail-open assertion a   *
+ *  tautology. Every macro mirrors nginx byte-for-byte; the shim REPLACES  *
+ *  nginx, it never redefines its semantics -- the real -Werror SSL module *
+ *  build is the only correctness contract. test-match.c includes this .c  *
+ *  directly, so the static next_line tokenizer, compile_bucket and the    *
+ *  NGX_PCRE2 bounded-exec helper are reachable.                          *
+ *                                                                        *
+ *  read_file is shimmed to serve an in-memory buffer (heavybag_ut_file):  *
+ *  file I/O is OS plumbing, not the unit under test; the config-time      *
+ *  PARSE in scanner_compile is. The nginx-glue tail (ua_list/ja4/         *
+ *  verified_bot/ua_classify) sits behind #ifndef -- it needs an           *
+ *  ngx_http_request_t / cidr_add / the ja4 table.                        *
+ * ===================================================================== */
+
+#include <stdlib.h>
+#include <string.h>
+
+#define PCRE2_CODE_UNIT_WIDTH  8
+#include <pcre2.h>
+
+#include "heavybag_match.h"   /* type shim: u_char/ngx_*_t/ngx_str_t/ngx_conf_t... */
+
+#define NGX_PCRE2  1
+
+#define NGX_OK          0
+#define NGX_ERROR     (-1)
+#define NGX_AGAIN     (-2)
+#define NGX_DONE      (-4)
+#define NGX_DECLINED  (-5)
+
+#define NGX_HTTP_NOT_FOUND   404
+#define NGX_HTTP_FORBIDDEN   403
+#define NGX_HTTP_CLOSE       444
+
+#define NGX_LOG_ALERT    1
+#define NGX_LOG_EMERG    2
+#define NGX_LOG_WARN     5
+#define NGX_LOG_NOTICE   6
+
+#define NGX_MAX_CONF_ERRSTR  1024
+#define NGX_REGEX_CASELESS   PCRE2_CASELESS
+
+/* arena: malloc-backed, leaked (the test process is short-lived) */
+#define ngx_palloc(pool, n)    malloc(n)
+#define ngx_pnalloc(pool, n)   malloc(n)
+#define ngx_pcalloc(pool, n)   calloc(1, (n))
+
+#define ngx_cpymem(dst, src, n)  (((u_char *) memcpy(dst, src, n)) + (n))
+#define ngx_memzero(p, n)        ((void) memset(p, 0, n))
+#define ngx_memcpy(dst, src, n)  ((void) memcpy(dst, src, n))
+#define ngx_strncmp(s1, s2, n)   strncmp((const char *) (s1), (const char *) (s2), n)
+
+/* the in-memory list buffer the test installs before scanner_compile */
+ngx_str_t  heavybag_ut_file;
+
+/* config-log capture: count EMERG so the unknown-action fatal is assertable */
+unsigned  heavybag_ut_emerg_count;
+static void
+heavybag_ut_log_capture(ngx_uint_t level)
+{
+    if (level == NGX_LOG_EMERG) {
+        heavybag_ut_emerg_count++;
+    }
+}
+#define ngx_conf_log_error(level, cf, err, ...)  heavybag_ut_log_capture(level)
+
+/* minimal ngx_array_t (malloc-backed, doubling growth) */
+static ngx_array_t *
+ngx_array_create(ngx_pool_t *pool, ngx_uint_t n, size_t size)
+{
+    ngx_array_t  *a;
+
+    (void) pool;
+    a = malloc(sizeof(ngx_array_t));
+    if (a == NULL) {
+        return NULL;
+    }
+    a->elts = malloc(n * size);
+    if (a->elts == NULL) {
+        free(a);
+        return NULL;
+    }
+    a->nelts = 0;
+    a->size = size;
+    a->nalloc = n;
+    a->pool = NULL;
+    return a;
+}
+
+static void *
+ngx_array_push(ngx_array_t *a)
+{
+    void  *ne;
+
+    if (a->nelts == a->nalloc) {
+        ne = realloc(a->elts, a->nalloc * 2 * a->size);
+        if (ne == NULL) {
+            return NULL;
+        }
+        a->elts = ne;
+        a->nalloc *= 2;
+    }
+    return (u_char *) a->elts + a->size * a->nelts++;
+}
+
+/* ngx_regex_compile -> real pcre2_compile (NGX_REGEX_CASELESS honoured) */
+static ngx_int_t
+ngx_regex_compile(ngx_regex_compile_t *rc)
+{
+    pcre2_code  *code;
+    int          errcode;
+    PCRE2_SIZE   erroff;
+
+    code = pcre2_compile(rc->pattern.data, rc->pattern.len,
+                         (uint32_t) rc->options, &errcode, &erroff, NULL);
+    if (code == NULL) {
+        rc->err.len = 0;
+        return NGX_ERROR;
+    }
+    rc->regex = (ngx_regex_t *) code;
+    return NGX_OK;
+}
+
+/* OOM fallback of the bounded-exec helper (mctx/mdata create failed) */
+static ngx_int_t
+ngx_regex_exec(ngx_regex_t *re, ngx_str_t *s, void *captures, ngx_uint_t size)
+{
+    pcre2_match_data  *md;
+    int                rc;
+
+    (void) captures;
+    (void) size;
+    md = pcre2_match_data_create(1, NULL);
+    if (md == NULL) {
+        return -1;
+    }
+    rc = pcre2_match((pcre2_code *) re, s->data, s->len, 0, 0, md, NULL);
+    pcre2_match_data_free(md);
+    return rc;
+}
+
+#endif
 
 
 /* Action bucket -> nginx finalize code. Indexed by ngx_http_heavybag_action_e. */
@@ -84,6 +237,8 @@ ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
 #endif
 
 
+#ifndef HEAVYBAG_MATCH_UNIT_TEST
+
 /*
  * Config-time: resolve path against the prefix, open and stat it, and read
  * the whole file into a temp-pool buffer returned via out. Logs and returns
@@ -142,6 +297,29 @@ ngx_http_heavybag_read_file(ngx_conf_t *cf, ngx_str_t *path, ngx_str_t *out)
 
     return NGX_OK;
 }
+
+#else
+
+/*
+ * Unit-test read_file: serve the in-memory list buffer the test installed in
+ * heavybag_ut_file. File I/O is OS plumbing, not the unit under test -- the
+ * config-time PARSE in scanner_compile is. NULL data -> NGX_ERROR (mirrors a
+ * missing file aborting the reload, fail-closed-to-old-config).
+ */
+static ngx_int_t
+ngx_http_heavybag_read_file(ngx_conf_t *cf, ngx_str_t *path, ngx_str_t *out)
+{
+    (void) cf;
+    (void) path;
+
+    if (heavybag_ut_file.data == NULL) {
+        return NGX_ERROR;
+    }
+    *out = heavybag_ut_file;
+    return NGX_OK;
+}
+
+#endif /* HEAVYBAG_MATCH_UNIT_TEST */
 
 
 /*
@@ -382,6 +560,8 @@ ngx_http_heavybag_scanner_lookup(ngx_regex_t **re_bucket, ngx_str_t *subject)
     return NGX_DECLINED;
 }
 
+
+#ifndef HEAVYBAG_MATCH_UNIT_TEST   /* nginx-glue tail (ua_list / ja4 / verified_bot / ua_classify) */
 
 ngx_int_t
 ngx_http_heavybag_ua_list_compile(ngx_conf_t *cf, ngx_http_heavybag_loc_conf_t *wlcf,
@@ -660,3 +840,5 @@ ngx_http_heavybag_ua_classify(ngx_http_request_t *r, ngx_http_heavybag_loc_conf_
 
     ctx->ua = HEAVYBAG_UA_REGULAR;
 }
+
+#endif /* HEAVYBAG_MATCH_UNIT_TEST -- nginx-glue tail */
