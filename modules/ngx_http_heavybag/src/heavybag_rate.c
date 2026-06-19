@@ -175,7 +175,7 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
     uint64_t rate_num_fp, ngx_uint_t period_ms, ngx_uint_t burst_fp)
 {
     int                        allow;
-    uint64_t                   h, k, old, neu, added, newtok, oldest_key;
+    uint64_t                   h, k, old, neu, added, newtok, oldest_key, sstate;
     uint32_t                   now32, o_ts, o_tok, tok, new_ts, elapsed;
     uint32_t                   age, best_age;
     ngx_uint_t                 i, p, idx, n;
@@ -215,14 +215,22 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
     s = NULL;
     oldest = NULL;
     oldest_key = 0;
-    best_age = 0;
+    /*
+     * Staleness floor: only a slot OLDER than a full period is an eviction
+     * candidate. Such a bucket would have refilled to a full burst regardless,
+     * so evicting it loses no token deficit -- whereas evicting a fresh slot
+     * would let an established abuser reset its own throttle by hammering. We
+     * start best_age at period_ms and require age STRICTLY greater (see below).
+     */
+    best_age = (uint32_t) period_ms;
     now32 = (uint32_t) (ngx_current_msec & 0xffffffff);
 
     /*
      * Probe the open-addressing window: claim an empty slot, find ours, or
-     * track the oldest (largest wrap-safe age) seen for eviction. The eviction
-     * candidate's key is SNAPSHOTTED so the single-shot evict-CAS below can
-     * detect a concurrent change and fail safely.
+     * track the oldest STALE (age > period_ms) slot for eviction. A fresh or
+     * active slot is never an eviction victim. The candidate's key is
+     * SNAPSHOTTED so the single-shot evict-CAS below can detect a concurrent
+     * change and fail safely.
      */
     for (p = 0; p < HEAVYBAG_RATE_PROBE_MAX; p++) {
         cand = &slots[(idx + p) % n];
@@ -240,8 +248,23 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
             break;
         }
 
-        age = now32 - (uint32_t) (cand->state >> 32);   /* wrap-safe age */
-        if (age >= best_age) {
+        /* eviction-candidate tracking -- never evict a fresh/active slot */
+        sstate = cand->state;
+        if (sstate == 0) {
+            continue;                        /* just-claimed/just-reset (key!=0,
+                                              * state==0): not yet a limiter */
+        }
+
+        age = now32 - (uint32_t) (sstate >> 32);   /* wrap-safe age */
+        if ((int32_t) age <= 0) {
+            /* age <= 0 as signed: either a concurrent writer stamped this slot
+             * at/after now32, or it is > ~24.8 days idle (past the 0x7FFFFFFF
+             * ms int32 sign flip). Skipping a 24-day-idle slot is harmless;
+             * the clamp's real job is to stop a future-stamped slot from
+             * underflowing to a giant age and being picked as "oldest". */
+            continue;
+        }
+        if (age > best_age) {                /* STRICTLY older than the floor */
             best_age = age;
             oldest = cand;
             oldest_key = k;
@@ -250,15 +273,27 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
 
     if (s == NULL) {
         /*
-         * Probe window full -> evict the oldest slot we saw (eviction-on-full,
-         * never a silent drop: a saturating attacker evicts itself, the limit
-         * stays live for every active IP). SINGLE-SHOT CAS, no retry: if the
+         * No slot of ours and the window is full. If nothing crossed the
+         * staleness floor (oldest == NULL: every probed slot is fresh/active),
+         * we do NOT evict a live limiter -- the new IP fails open and the
+         * saturation is COUNTED. An established abuser therefore cannot reset
+         * its own bucket by saturating the window; the only cost is that an
+         * extreme table-saturation attack lets new IPs through, observable via
+         * rate_overflow (wired to metrics/alerts) and mitigated by sizing the
+         * zone (see the waf_rate directive doc).
+         */
+        if (oldest == NULL) {
+            (void) ngx_atomic_fetch_add(&hdr->rate_overflow, 1);
+            return NGX_OK;       /* no stale victim -> new IP fails open */
+        }
+
+        /*
+         * Evict the oldest STALE slot (age > period_ms, so it would have
+         * refilled to a full burst anyway). SINGLE-SHOT CAS, no retry: if the
          * snapshotted key changed underneath us the CAS fails and we fail-open
          * -- one missed eviction is not a hole.
          */
-        if (oldest != NULL
-            && ngx_atomic_cmp_set(&oldest->key, oldest_key, h))
-        {
+        if (ngx_atomic_cmp_set(&oldest->key, oldest_key, h)) {
             oldest->state = 0;   /* plain store: the new owner starts from a
                                   * full bucket (state 0 -> huge elapsed). The
                                   * race with the CAS loop below costs at worst
@@ -270,6 +305,11 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
             return NGX_OK;       /* eviction lost -> fail-open */
         }
     }
+
+    /* INVARIANT: every path reaching here has s != NULL. The s == NULL block
+     * above either returned (oldest == NULL, or the evict-CAS lost) or set
+     * s = oldest; the probe loop sets s on claim/match. So the token-bucket
+     * CAS loop below never dereferences a NULL slot. */
 
     /* token-bucket CAS on the packed state, bounded to guard against livelock */
     for (i = 0; i < HEAVYBAG_RATE_CAS_MAX; i++) {
