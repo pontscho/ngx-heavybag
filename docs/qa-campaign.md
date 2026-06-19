@@ -745,3 +745,31 @@ Ground-truth IPs (oracle-validated at runtime): `185.177.72.1` FR/AS211590/0x000
 **Verdict:** **no production defect.** The precedence is exactly as documented and deterministic across every collision; the controls confirm each lower-priority source would otherwise fire. Purely additive: **no `src/*.c`/`*.h` edited; deployed SSL `.so` md5 `03a216df17d1661854e8287045050eb8` unchanged**. New files: `tests/run-reputation-precedence.sh`, `tests/heavybag-repprec-test.conf`, +1 CTest registration (`heavybag_repprec`; CTest count 11 -> 12).
 
 **Still un-probed (optional):** spoof self-swap (JA4↔UA family-mismatch matrix), stat_cc table saturation (513+ distinct CCs -> `cc_overflow`). Both green-but-shallow, not known bugs.
+
+---
+
+## Optional round — JA4<->UA spoof "self-swap" (2026-06-19)
+
+Closes the critic's third un-probed surface. `ngx_http_heavybag_ua_spoof_eval()` (`heavybag_ua_parse.c:717`) raises `is_spoofed` on either of two signals: **ja4_signal** — the observed TLS JA4's family contradicts the UA-claimed family (`fam_ja4 != fam_ua`, both must be != UNKNOWN; `:744`) — or **cidr_signal** — a UA in a verified-bot class whose client IP is outside that class's CIDR (`:756`). The protocol A10 stanza covered exactly one mismatch + one off-control; this round drives the full `{fam_ja4} x {fam_ua}` grid plus the cidr path.
+
+**"self-swap":** the concern was whether swapping the two inputs (which side claims which family) could misfire. It cannot — `fam_ja4` is always the ja4.list lookup of the observed JA4, `fam_ua` always the UA-parse, two independent code paths with no conditional swap, compared by a symmetric `!=`. This round proves that symmetry empirically: tool-JA4+Chrome-UA **and** chromium-JA4+curl-UA both spoof; tool+curl **and** chromium+Chrome both pass.
+
+**Surface:** new harness `tests/run-spoof-fuzz.sh` + `tests/heavybag-spoof-fuzz.conf` (4 vhosts, ports 288xx), registered as CTest `heavybag_spoof`. The host curl has one observed JA4; the runner maps it to a chosen family per `waf_ja4_list` reload (`chromium/firefox/safari/tool`, or absent -> UNKNOWN), so the whole fam_ja4 axis is reachable with a single client. **21/21 PASS** (no production defect). SKIPs (exit 2) if the live JA4 is unreadable.
+
+| Vector | fam_ja4 / fam_ua | Result | Proves |
+|---|---|---|---|
+| match | tool / curl(TOOL); chromium / Chrome; firefox / Firefox; safari / Safari | 200, X-Spoof=0 | equal families never spoof |
+| mismatch | tool / Chrome(CHROMIUM) | 403, X-Spoof=1 | the canonical "tool pretending to be a browser" |
+| **self-swap** | chromium / curl(TOOL) | 403 | reverse of the above -> the compare is symmetric |
+| cross | firefox / Chrome; safari / curl; chromium / Firefox | 403 | every distinct family pair contradicts |
+| same-family | chromium / Edge(CHROMIUM) | 200 | Edge groups with Chrome -> NOT a spoof |
+| UNKNOWN guard (ua) | tool / `MysteryBrowser`(UNKNOWN) | 200 | an unmapped UA suppresses the signal |
+| UNKNOWN guard (ja4) | absent(UNKNOWN) / Chrome | 200 | a JA4 not in the list suppresses the signal |
+| observe | tool / Chrome, `waf_spoof_block off` | 200, X-Spoof=1 | detected (observability) but not blocked |
+| detect | tool / Chrome, `waf detect` | 200, X-Spoof=1 | would-block recorded, request allowed |
+| cidr_signal | fake `Googlebot` UA, IP outside verified CIDR | 403 `spoof` | the second signal; spoof runs before fake-bot (`module.c:1163`<`:1213`) so the verdict is SPOOF |
+| cidr control | `Googlebot` inside CIDR; non-crawler UA outside | 200 | needs both the crawler class AND an out-of-range IP |
+
+**Verdict:** **no production defect.** The mismatch matrix is exact and symmetric, both UNKNOWN guards suppress false positives, observe/detect downgrade correctly, and the cidr_signal fires (and wins over fake-bot) as designed. Purely additive: **no `src/*.c`/`*.h` edited; deployed SSL `.so` md5 `03a216df17d1661854e8287045050eb8` unchanged**. New files: `tests/run-spoof-fuzz.sh`, `tests/heavybag-spoof-fuzz.conf`, +1 CTest registration (`heavybag_spoof`; CTest count 12 -> 13). (One test-harness bug was caught + fixed during the run: the error-log filter initially flagged benign `[notice] worker process ... exited with code 0` reload lines; narrowed to non-zero exits / signals only.)
+
+**Still un-probed (optional):** only stat_cc table saturation remains (513+ distinct country codes exhaust the 512-slot open-addressed `cc[]` table -> the `cc_overflow` silent-drop path at `module.c:595`). Green-but-shallow, not a known bug; best exercised at the unit layer with a synthetic shm (needs a `heavybag_status` header-split), so deferred. **3 of the critic's 4 un-probed surfaces are now closed.**

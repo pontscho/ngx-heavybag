@@ -94,6 +94,13 @@ heavybag_add_test(heavybag_mailauth     run-mailauth-fuzz.sh    LABELS "integrat
 # controls. Geo-centric: SKIPs (exit 2) if geodb/oracle is absent or drifted.
 heavybag_add_test(heavybag_repprec      run-reputation-precedence.sh LABELS "integration"    TIMEOUT 600  NGINX_BOUND)
 
+# --- JA4<->UA spoof deep-fuzz / "self-swap" (the critic's un-probed matrix) ---
+# Drives the full {fam_ja4} x {fam_ua} grid of ngx_http_heavybag_ua_spoof_eval
+# (ja4.list reloads map the live curl JA4 to each family) + the cidr_signal
+# fake-verified-bot path. Needs OpenSSL curl + the deployed .so; SKIPs (exit 2)
+# if the live JA4 is unreadable.
+heavybag_add_test(heavybag_spoof        run-spoof-fuzz.sh       LABELS "integration"         TIMEOUT 600  NGINX_BOUND)
+
 # --- detect-mode replay (FP gate is the pass/fail; coverage sweep capped) -----
 # Exit 0 iff the false-positive gate holds (every baseline path returns reason=none
 # and all would_block deltas are 0); the main coverage replay is bounded by LIMIT.
