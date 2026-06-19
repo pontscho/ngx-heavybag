@@ -49,11 +49,28 @@ SAN="-fsanitize=address,undefined -fno-sanitize-recover=all --param asan-globals
 # so LeakSanitizer is disabled for the run; ASan/UBSan still catch OOB and UB.
 SAN_RUN="ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
 
+# ---- coverage opt-in (HEAVYBAG_COVERAGE=1) -------------------------------
+# Instruments every suite with gcov (--coverage) and drops to -O0 so the
+# line/branch attribution is exact. Composes with ASan; NOT with TSan (that
+# is its own pass). When unset, $COV is empty and this script is byte-
+# identical to the plain run -- the heavybag_unit gate stays fast (-O2, no
+# gcov, no cd).
+#
+# Footgun: each suite is ONE translation unit (test-X.c #includes the
+# production src/heavybag_*.c), and a single-step compile+link names the
+# notes/data files "<outbin>-<srcbase>.gcno/.gcda" in the COMPILE cwd. We cd
+# into $TMP so they land deterministically, then gcov the stem after the run.
+COV=""
+if [ "${HEAVYBAG_COVERAGE:-0}" = "1" ]; then
+    COV="--coverage -O0"
+    cd "$TMP" || { echo "coverage: cannot cd to $TMP"; exit 1; }
+fi
+
 rc=0
 
 # ---- JA4 core -------------------------------------------------------------
 BIN_JA4="$TMP/heavybag-test-ja4"
-if "$CC" -DHEAVYBAG_JA4_UNIT_TEST $COMMON $SAN "$DIR/test-ja4.c" -lcrypto -o "$BIN_JA4"; then
+if "$CC" -DHEAVYBAG_JA4_UNIT_TEST $COMMON $COV $SAN "$DIR/test-ja4.c" -lcrypto -o "$BIN_JA4"; then
     echo "== JA4 core (ASan+UBSan) =="
     env $SAN_RUN "$BIN_JA4" "$@" || rc=1
 else
@@ -62,7 +79,7 @@ fi
 
 # ---- JA4 SSL extractor (mocked getters, real core) -----------------------
 BIN_JA4X="$TMP/heavybag-test-ja4-extract"
-if "$CC" -DHEAVYBAG_JA4_EXTRACT_UNIT_TEST $COMMON $SAN "$DIR/test-ja4-extract.c" -lcrypto -o "$BIN_JA4X"; then
+if "$CC" -DHEAVYBAG_JA4_EXTRACT_UNIT_TEST $COMMON $COV $SAN "$DIR/test-ja4-extract.c" -lcrypto -o "$BIN_JA4X"; then
     echo "== JA4 SSL extractor (ASan+UBSan) =="
     env $SAN_RUN "$BIN_JA4X" "$@" || rc=1
 else
@@ -71,7 +88,7 @@ fi
 
 # ---- UA descriptive parser core ------------------------------------------
 BIN_UA="$TMP/heavybag-test-ua-parse"
-if "$CC" -DHEAVYBAG_UA_PARSE_UNIT_TEST $COMMON "$DIR/test_heavybag_ua_parse.c" -o "$BIN_UA"; then
+if "$CC" -DHEAVYBAG_UA_PARSE_UNIT_TEST $COMMON $COV "$DIR/test_heavybag_ua_parse.c" -o "$BIN_UA"; then
     echo "== UA parser core =="
     "$BIN_UA" "$@" || rc=1
 else
@@ -80,7 +97,7 @@ fi
 
 # ---- rate-limit token-bucket core ----------------------------------------
 BIN_RATE="$TMP/heavybag-test-rate"
-if "$CC" -DHEAVYBAG_RATE_UNIT_TEST $COMMON "$DIR/test-rate.c" -o "$BIN_RATE"; then
+if "$CC" -DHEAVYBAG_RATE_UNIT_TEST $COMMON $COV "$DIR/test-rate.c" -o "$BIN_RATE"; then
     echo "== rate-limit core =="
     "$BIN_RATE" "$@" || rc=1
 else
@@ -89,7 +106,7 @@ fi
 
 # ---- geo radix-trie walk core --------------------------------------------
 BIN_GEO="$TMP/heavybag-test-geo"
-if "$CC" -DHEAVYBAG_GEO_UNIT_TEST $COMMON "$DIR/test-geo.c" -o "$BIN_GEO"; then
+if "$CC" -DHEAVYBAG_GEO_UNIT_TEST $COMMON $COV "$DIR/test-geo.c" -o "$BIN_GEO"; then
     echo "== geo trie core =="
     "$BIN_GEO" "$@" || rc=1
 else
@@ -98,7 +115,7 @@ fi
 
 # ---- scanner/match core (real PCRE2 match/depth-limit fix) ---------------
 BIN_MATCH="$TMP/heavybag-test-match"
-if "$CC" -DHEAVYBAG_MATCH_UNIT_TEST $COMMON $SAN "$DIR/test-match.c" -lpcre2-8 -o "$BIN_MATCH"; then
+if "$CC" -DHEAVYBAG_MATCH_UNIT_TEST $COMMON $COV $SAN "$DIR/test-match.c" -lpcre2-8 -o "$BIN_MATCH"; then
     echo "== scanner/match core (ASan+UBSan) =="
     env $SAN_RUN "$BIN_MATCH" "$@" || rc=1
 else
@@ -107,11 +124,62 @@ fi
 
 # ---- per-country stat-table core (open-addressed cc[] + cc_overflow) -----
 BIN_STATCC="$TMP/heavybag-test-stat-cc"
-if "$CC" -DHEAVYBAG_STAT_CC_UNIT_TEST $COMMON "$DIR/test-stat-cc.c" -o "$BIN_STATCC"; then
+if "$CC" -DHEAVYBAG_STAT_CC_UNIT_TEST $COMMON $COV "$DIR/test-stat-cc.c" -o "$BIN_STATCC"; then
     echo "== per-country stat-table core =="
     "$BIN_STATCC" "$@" || rc=1
 else
     echo "stat-cc unit test COMPILE FAILED"; rc=1
+fi
+
+# ---- reputation verdict-precedence core (pure decision fn, mocked deps) ---
+BIN_REP="$TMP/heavybag-test-reputation"
+if "$CC" -DHEAVYBAG_REPUTATION_UNIT_TEST $COMMON $COV "$DIR/test-reputation.c" -o "$BIN_REP"; then
+    echo "== reputation verdict core =="
+    "$BIN_REP" "$@" || rc=1
+else
+    echo "reputation unit test COMPILE FAILED"; rc=1
+fi
+
+# ---- per-suite coverage report (gcov text; lcov HTML if available) -------
+# Each suite is ONE translation unit: test-X.c #includes the production
+# src/heavybag_*.c. gcov on the TU stem reports every contributing source;
+# we print only the production files (src/heavybag*), skipping the harness.
+if [ "${HEAVYBAG_COVERAGE:-0}" = "1" ]; then
+    echo
+    echo "================== COVERAGE (gcov -b) =================="
+    cov_one() {  # $1 = output-binary basename (== gcno/gcda stem prefix), $2 = test src
+        stem="$1-${2%.c}"
+        if [ ! -f "$TMP/$stem.gcda" ]; then
+            echo "  [$1] no .gcda (suite skipped or aborted -- no coverage)"; return
+        fi
+        # gcov lists the production file as its LAST File block, so the
+        # trailing whole-TU summary would inherit p=1; reset on 'Creating'.
+        gcov -b "$stem" 2>/dev/null | awk '
+            /^File / { p = ($0 ~ /src\/heavybag/); if (p) print "  " $0; next }
+            /^Creating / { p = 0; next }
+            p && /^Lines executed:/    { print "      " $0 }
+            p && /^Branches executed:/ { print "      " $0 }
+        '
+    }
+    cov_one heavybag-test-ja4          test-ja4.c
+    cov_one heavybag-test-ja4-extract  test-ja4-extract.c
+    cov_one heavybag-test-ua-parse     test_heavybag_ua_parse.c
+    cov_one heavybag-test-rate         test-rate.c
+    cov_one heavybag-test-geo          test-geo.c
+    cov_one heavybag-test-match        test-match.c
+    cov_one heavybag-test-stat-cc      test-stat-cc.c
+    cov_one heavybag-test-reputation   test-reputation.c
+    cov_one heavybag-test-match-pcre1  test-match-pcre1.c
+
+    if command -v lcov >/dev/null 2>&1 && command -v genhtml >/dev/null 2>&1; then
+        lcov --quiet --capture --directory "$TMP" --output-file "$TMP/heavybag.info" 2>/dev/null
+        if genhtml --quiet --output-directory "$TMP/coverage-html" "$TMP/heavybag.info" 2>/dev/null; then
+            echo "  HTML report: $TMP/coverage-html/index.html"
+        fi
+    else
+        echo "  (lcov/genhtml absent -> gcov text only; install lcov for an HTML report)"
+    fi
+    echo "========================================================"
 fi
 
 exit $rc

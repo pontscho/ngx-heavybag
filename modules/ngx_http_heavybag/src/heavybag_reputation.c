@@ -190,6 +190,8 @@ ngx_http_heavybag_reputation_check(ngx_heavybag_rep_conf_t *rep,
 }
 
 
+#ifndef HEAVYBAG_REPUTATION_UNIT_TEST  /* config-time helpers need nginx; out of the pure-core unit TU */
+
 ngx_int_t
 ngx_http_heavybag_cidr_add(ngx_conf_t *cf, ngx_array_t **arr, ngx_str_t *text)
 {
@@ -349,3 +351,5 @@ ngx_http_heavybag_flag_add(ngx_conf_t *cf, ngx_heavybag_rep_conf_t *rep,
 
     return NGX_OK;
 }
+
+#endif /* !HEAVYBAG_REPUTATION_UNIT_TEST */

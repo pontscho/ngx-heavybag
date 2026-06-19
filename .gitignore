@@ -52,6 +52,14 @@ ngxlogs/
 # (detect/enforce probe outputs, covered-subset feeds, compare.pl) is ignored.
 /modules/ngx_http_heavybag/tests/corpus/.freeze-tmp/
 
+# Per-run harness scratch: the portable test harness renders the committed
+# *.conf templates (resolving $HEAVYBAG_ROOT to absolute paths) and copies the
+# geolookup probes into .render/, while the config-build layer stages generated
+# inputs plus a throwaway nginx instance (corrupt.db, *.list, nt.pid/stderr) into
+# .config-tmp/. Both are regenerated on every run; neither is ever committed.
+/modules/ngx_http_heavybag/tests/corpus/.render/
+/modules/ngx_http_heavybag/tests/corpus/.config-tmp/
+
 # Python bytecode cache (created when the offline ja4.list regen script under
 # modules/ngx_http_heavybag/tools/ is imported as a module for diagnostics; never
 # source -- the .py itself is committed, the cache is regenerated on demand).
