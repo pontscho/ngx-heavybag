@@ -81,6 +81,13 @@ heavybag_add_test(heavybag_stat         run-stat-tests.sh       LABELS "integrat
 heavybag_add_test(heavybag_regression   run-regression-tests.sh LABELS "integration"         TIMEOUT 600  NGINX_BOUND)
 heavybag_add_test(heavybag_runtime      run-runtime-tests.sh    LABELS "integration;runtime" TIMEOUT 600  NGINX_BOUND)
 
+# --- mail auth_http content-handler deep-fuzz (the critic's un-probed SMTP) ---
+# Drives the 8 fedetlen edges of heavybag_authhttp.c (missing/garbage/IPv6/multi
+# Client-IP, untrusted-peer spoof, geo/asn/flag verdict, missing backend, for_geo
+# rate). Geo edges self-validate ground truth via reference/geolookup.c and SKIP
+# if geodb is absent/drifted; the #5 edges SKIP on a loopback-only host.
+heavybag_add_test(heavybag_mailauth     run-mailauth-fuzz.sh    LABELS "integration"         TIMEOUT 600  NGINX_BOUND)
+
 # --- detect-mode replay (FP gate is the pass/fail; coverage sweep capped) -----
 # Exit 0 iff the false-positive gate holds (every baseline path returns reason=none
 # and all would_block deltas are 0); the main coverage replay is bounded by LIMIT.

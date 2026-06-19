@@ -696,3 +696,26 @@ Live master/worker cycle (binds 127.0.0.1 286xx). **10/10 PASS.**
 **Relocatable harnesses (2026-06-19):** every `run-*.sh` reads its repo root from `ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/openresty}`, and CTest injects `HEAVYBAG_ROOT=${CMAKE_SOURCE_DIR}` (the `ENVIRONMENT` test property), so a moved/renamed checkout works with no edits. The committed `.conf` files (which bake absolute paths nginx cannot env-substitute) are rendered through `sed s#<default-root>#$ROOT#` into `tests/corpus/.render/` before nginx loads them (a no-op on the default root); the runtime-generated confs already build from `$ROOT`/`$SBX` vars. Proven end-to-end: a `/tmp/hb-relocated -> repo` symlink + `HEAVYBAG_ROOT=/tmp/hb-relocated` ran config 34/34 + runtime 10/10 with the rendered conf carrying the relocated `load_module /tmp/hb-relocated/...` path.
 
 Verdict unchanged from Discovery: **zero attacker-triggerable memory-corruption, crash, or security bypass.** Every issue the campaign found was build-portability, operator-config footgun, accounting honesty, or the one feature gap (JA4-vs-UA spoof enforcement) — all addressed in the three fix rounds and now permanently guarded by tests.
+
+---
+
+## Optional round — mail auth_http deep-fuzz (2026-06-19)
+
+The campaign critic flagged four surfaces it had not fuzzed to the depth of the rest ("un-probed deep-fuzz"): **authhttp SMTP**, spoof self-swap, reputation verdict-precedence, stat_cc table saturation. None were known defects — each was a surface that Discovery saw green but did not exhaust. This round closes the **authhttp SMTP** one (the thinnest existing net: only protocol A12 + stat SMTP-auth, both trusted-loopback-peer + well-formed IPv4).
+
+**Surface:** `modules/ngx_http_heavybag/src/heavybag_authhttp.c` — the `waf_mail_auth` content handler ngx_mail's `auth_http` calls, judging the real SMTP/IMAP peer carried in the `Client-IP` request header. New harness `tests/run-mailauth-fuzz.sh` + `tests/heavybag-mailauth-fuzz.conf` (8 vhosts, ports 286xx), registered as CTest `heavybag_mailauth` (label `integration`, `RESOURCE_LOCK heavybag_sandbox`). **32/32 PASS, 0 fail, 0 skip** on the dev host; geo edges self-validate ground truth at runtime via the `reference/geolookup.c` oracle (SKIP, not fail, if geodb is absent/drifted); the untrusted-peer edges bind a real non-loopback IPv4 (`ip route get` / `hostname -I`; SKIP on a loopback-only host).
+
+| # | Edge | Code | Result |
+|---|---|---|---|
+| #1 | missing `Client-IP` | `:68-79` fail-open + WARN | allow `Auth-Status: OK` + WARN `mail auth without parseable Client-IP` logged |
+| #2 | garbage / oversized / inject | `:69` `ngx_parse_addr` reject -> fail-open | 5 garbage forms + 8KB value all fail-open clean; `%0d%0aX-Injected:` payload **not reflected** (Client-IP is parsed as an address, never echoed) — no crash, no header injection |
+| #3 | IPv6 `Client-IP` | `ngx_parse_addr` v6 + reputation | blocklisted `2001:db8:bad::/48` -> `static blocklist`; benign v6 -> OK; **IPv4-mapped `::ffff:203.0.113.7` matches the v4 CIDR** -> `static blocklist` (blocklist match is family-transparent) |
+| #4 | multiple `Client-IP` headers | `:311` first-wins | `[blocklisted, benign]` -> deny; `[benign, blocklisted]` -> allow (the FIRST header is authoritative) |
+| #5 | untrusted-peer spoof | `:154-186` trusted-check -> `:88` peer fallback | **security invariant HOLDS** (proven over a real 192.168.x peer): 5a peer-blocklisted + benign Client-IP -> deny (can't spoof clean); 5b peer-clean + blocklisted Client-IP -> ignored -> allow; WARN `mail auth from untrusted peer` logged |
+| #6 | geo / asn / flag verdict | `reputation_check` step 5/6/9 | `Auth-Status` carries the non-blocklist reason: FR -> `geo country`; AS15169 -> `asn`; anycast(0x0004) -> `network flag`; each with a passing control IP |
+| #7 | missing `waf_mail_backend` | `:207-211` ERR-log-but-allow | allow -> `Auth-Status: OK` with **no `Auth-Server` header** + ERR `waf_mail_backend is not set` logged; deny still works without a backend |
+| #8 | rate + geo rule-select | `:117` `rate_rule_select(&verdict)` | `for_geo=FR` strict rule (burst=1) selected for an FR Client-IP -> req2 `rate limit`; a US Client-IP falls to the default lenient rule -> stays OK (proves selection gates on `verdict.geo_valid` + country) |
+
+**Verdict:** **no production defect.** The handler is robust against every malformed/hostile `Client-IP` (clean fail-open, no crash, no reflection), the untrusted-peer trust boundary holds, the v6 path works, and all five reputation reasons map correctly into `Auth-Status`. Purely additive test coverage — **no `src/*.c`/`*.h` edited; deployed SSL `.so` md5 `03a216df17d1661854e8287045050eb8` unchanged** (build==deploy). New files: `tests/run-mailauth-fuzz.sh`, `tests/heavybag-mailauth-fuzz.conf`, +1 CTest registration in `cmake/Tests.cmake`. Unit/integration totals rise to: integration now includes mailauth (32). CTest test count 10 -> 11 (`heavybag_mailauth`).
+
+**Still un-probed (optional, separate rounds):** spoof self-swap (the JA4↔UA family-mismatch matrix), reputation verdict-precedence (multi-source collisions: which reason wins when an IP hits blocklist + geo + ASN simultaneously), stat_cc table saturation (513+ distinct country codes -> `cc_overflow` silent-drop path). Each is green-but-shallow, not a known bug.
