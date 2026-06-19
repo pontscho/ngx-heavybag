@@ -26,7 +26,7 @@
  *  Substitutes nginx for the config-time list parser + the PCRE2 bucket  *
  *  compile/exec core. REAL PCRE2 is linked (-lpcre2-8): the round-2       *
  *  ReDoS match/depth-limit fix runs end-to-end against pcre2_match(),     *
- *  never a mock -- a mocked engine would make the fail-open assertion a   *
+ *  never a mock -- a mocked engine would make the fail-closed assertion a *
  *  tautology. Every macro mirrors nginx byte-for-byte; the shim REPLACES  *
  *  nginx, it never redefines its semantics -- the real -Werror SSL module *
  *  build is the only correctness contract. test-match.c includes this .c  *
@@ -83,6 +83,10 @@ ngx_str_t  heavybag_ut_file;
 
 /* config-log capture: count EMERG so the unknown-action fatal is assertable */
 unsigned  heavybag_ut_emerg_count;
+
+/* bounded-exec limit/error capture: count match/depth-limit hits so the
+ * fail-CLOSED verdict (and the "not silent" guarantee) is assertable */
+unsigned  heavybag_ut_regex_limit_count;
 static void
 heavybag_ut_log_capture(ngx_uint_t level)
 {
@@ -193,21 +197,87 @@ static ngx_int_t ngx_http_heavybag_compile_bucket(ngx_conf_t *cf,
  * CPU foot-gun. nginx exposes no match-limit knob, so we bypass the wrapper
  * with a module-local match context carrying explicit limits.
  *
- * On MATCHLIMIT/DEPTHLIMIT pcre2_match() returns negative -> treated as
- * no-match (fail-open): the CPU is bounded and legit traffic is not blocked
- * because an operator's pattern blew the limit (a config problem, not a
- * request). The statics are per-worker, single-threaded -> safe; they live
- * for the process lifetime (reclaimed at exit, like nginx's own global
- * ngx_regex_match_data) -- deliberately no exit_process handler for two
- * tiny objects. The PCRE1 path keeps working via the wrapper.
+ * The exec returns a TRI-STATE, not a raw rc: a clean NOMATCH is the only
+ * outcome we trust as "subject is clean". MATCHLIMIT, DEPTHLIMIT and any
+ * internal PCRE error mean the engine could NOT finish judging the subject,
+ * so we must NOT silently pass it as clean (that is a detection bypass: a
+ * crafted subject that would match a signature can be padded to blow the
+ * budget and slip through). Such a subject is reported as HEAVYBAG_RE_ERROR
+ * and the caller fails CLOSED -- it is treated as a hit, letting the standard
+ * detect/enforce finalizer decide (observable as a (would-)block, and the
+ * blown limit is surfaced once per worker via the warn helper). The CPU stays
+ * bounded either way. The statics are per-worker, single-threaded -> safe;
+ * they live for the process lifetime (reclaimed at exit, like nginx's own
+ * global ngx_regex_match_data) -- deliberately no exit_process handler for two
+ * tiny objects. The PCRE1 path keeps working via the wrapper (its engine has
+ * no match-limit knob, so it can only ever yield MATCH/NOMATCH/internal-error).
  */
+
+/* tri-state outcome of a bounded regex exec */
+typedef enum {
+    HEAVYBAG_RE_NOMATCH = 0,   /* evaluated cleanly: pattern did not match     */
+    HEAVYBAG_RE_MATCH   = 1,   /* evaluated cleanly: pattern matched           */
+    HEAVYBAG_RE_ERROR   = 2     /* could NOT evaluate: match/depth limit hit,  */
+                                /* OOM, or internal PCRE error -> fail CLOSED  */
+} ngx_http_heavybag_re_e;
+
+/*
+ * A bounded exec could not evaluate a subject. That is operator-actionable (a
+ * signature/UA pattern is prone to catastrophic backtracking), so surface it
+ * ONCE per worker -- a per-request unthrottled log would itself be a flood
+ * vector under a crafted-subject attack. The recurring volume is visible in
+ * the (would-)block metrics the fail-closed verdict feeds.
+ */
+static void
+ngx_http_heavybag_regex_limit_warn(void)
+{
+#if defined(HEAVYBAG_MATCH_UNIT_TEST)
+    heavybag_ut_regex_limit_count++;
+#else
+    static ngx_uint_t  warned;
+
+    if (!warned) {
+        warned = 1;
+        ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
+                      "heavybag: a signature/UA pattern hit the PCRE2 "
+                      "match/depth limit; the subject is treated as a match "
+                      "(fail-closed). Review the pattern for catastrophic "
+                      "backtracking.");
+    }
+#endif
+}
+
+#if (NGX_PCRE2)
+#define HEAVYBAG_RE_NOMATCH_RC  PCRE2_ERROR_NOMATCH
+#else
+#define HEAVYBAG_RE_NOMATCH_RC  NGX_REGEX_NO_MATCHED
+#endif
+
+/*
+ * Map a raw PCRE rc to the tri-state. >=0 is a match; the single negative we
+ * treat as clean is NOMATCH; every other negative (limit/internal) is ERROR
+ * and triggers the once-per-worker warn.
+ */
+static ngx_http_heavybag_re_e
+ngx_http_heavybag_re_classify(int rc)
+{
+    if (rc >= 0) {
+        return HEAVYBAG_RE_MATCH;
+    }
+    if (rc == HEAVYBAG_RE_NOMATCH_RC) {
+        return HEAVYBAG_RE_NOMATCH;
+    }
+    ngx_http_heavybag_regex_limit_warn();
+    return HEAVYBAG_RE_ERROR;
+}
+
 #if (NGX_PCRE2)
 #define HEAVYBAG_PCRE2_MATCH_LIMIT  100000   /* bound backtracking steps */
 #define HEAVYBAG_PCRE2_DEPTH_LIMIT  1000     /* bound recursion depth */
 static pcre2_match_context  *heavybag_mctx;
 static pcre2_match_data     *heavybag_mdata;
 
-static ngx_int_t
+static ngx_http_heavybag_re_e
 ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
 {
     int  rc;
@@ -215,7 +285,9 @@ ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
     if (heavybag_mctx == NULL) {
         heavybag_mctx = pcre2_match_context_create(NULL);
         if (heavybag_mctx == NULL) {
-            return ngx_regex_exec(re, s, NULL, 0);   /* OOM -> wrapper */
+            /* OOM -> wrapper (no limit, but still classified tri-state) */
+            return ngx_http_heavybag_re_classify(
+                       (int) ngx_regex_exec(re, s, NULL, 0));
         }
         pcre2_set_match_limit(heavybag_mctx, HEAVYBAG_PCRE2_MATCH_LIMIT);
         pcre2_set_depth_limit(heavybag_mctx, HEAVYBAG_PCRE2_DEPTH_LIMIT);
@@ -223,17 +295,24 @@ ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
     if (heavybag_mdata == NULL) {
         heavybag_mdata = pcre2_match_data_create(1, NULL);   /* boolean match */
         if (heavybag_mdata == NULL) {
-            return ngx_regex_exec(re, s, NULL, 0);
+            return ngx_http_heavybag_re_classify(
+                       (int) ngx_regex_exec(re, s, NULL, 0));
         }
     }
 
     rc = pcre2_match((pcre2_code *) re, s->data, s->len, 0, 0,
                      heavybag_mdata, heavybag_mctx);
 
-    return (ngx_int_t) rc;   /* >=0 match; <0 NOMATCH/MATCHLIMIT/DEPTHLIMIT */
+    return ngx_http_heavybag_re_classify(rc);
 }
 #else
-#define ngx_http_heavybag_regex_exec(re, s)  ngx_regex_exec((re), (s), NULL, 0)
+static ngx_http_heavybag_re_e
+ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
+{
+    /* PCRE1: no match-limit knob (see #7); still classified so an internal
+     * error fails CLOSED instead of being read as a clean no-match. */
+    return ngx_http_heavybag_re_classify((int) ngx_regex_exec(re, s, NULL, 0));
+}
 #endif
 
 
@@ -552,7 +631,16 @@ ngx_http_heavybag_scanner_lookup(ngx_regex_t **re_bucket, ngx_str_t *subject)
             continue;
         }
 
-        if (ngx_http_heavybag_regex_exec(re_bucket[i], subject) >= 0) {
+        /*
+         * MATCH or ERROR both yield this bucket's action: a clean match blocks,
+         * and a subject the bounded engine could NOT finish judging (match/depth
+         * limit, internal error) fails CLOSED -- treated as a hit so the
+         * detect/enforce finalizer decides, never waved through as clean. Only a
+         * clean NOMATCH advances to the next bucket.
+         */
+        if (ngx_http_heavybag_regex_exec(re_bucket[i], subject)
+            != HEAVYBAG_RE_NOMATCH)
+        {
             return (ngx_int_t) heavybag_action_code[i];
         }
     }
@@ -832,7 +920,13 @@ ngx_http_heavybag_ua_classify(ngx_http_request_t *r, ngx_http_heavybag_loc_conf_
             continue;
         }
 
-        if (ngx_http_heavybag_regex_exec(wlcf->ua_re[i], &ua) >= 0) {
+        /* MATCH or fail-closed ERROR both classify into this category; only a
+         * clean NOMATCH falls through to the next (lower-priority) list. A UA
+         * the bounded engine could not judge is treated as the more-suspicious
+         * class rather than silently demoted to REGULAR. */
+        if (ngx_http_heavybag_regex_exec(wlcf->ua_re[i], &ua)
+            != HEAVYBAG_RE_NOMATCH)
+        {
             ctx->ua = (ngx_http_heavybag_ua_e) i;
             return;
         }
