@@ -306,9 +306,11 @@ ngx_http_heavybag_ja4_build(const uint16_t *ciphers, size_t n_ciphers,
  * ---------------------------------------------------------------------------
  */
 
+#ifndef HEAVYBAG_JA4_EXTRACT_UNIT_TEST   /* extractor unit-mock (test-ja4-extract.c) supplies nginx + SSL-getter shims */
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <openssl/ssl.h>
+#endif
 
 #if (NGX_HTTP_SSL)
 

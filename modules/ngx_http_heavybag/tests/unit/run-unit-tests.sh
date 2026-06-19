@@ -38,6 +38,15 @@ else
     echo "JA4 unit test COMPILE FAILED"; rc=1
 fi
 
+# ---- JA4 SSL extractor (mocked getters, real core) -----------------------
+BIN_JA4X="$TMP/heavybag-test-ja4-extract"
+if "$CC" -DHEAVYBAG_JA4_EXTRACT_UNIT_TEST $COMMON "$DIR/test-ja4-extract.c" -lcrypto -o "$BIN_JA4X"; then
+    echo "== JA4 SSL extractor =="
+    "$BIN_JA4X" "$@" || rc=1
+else
+    echo "JA4 extractor unit test COMPILE FAILED"; rc=1
+fi
+
 # ---- UA descriptive parser core ------------------------------------------
 BIN_UA="$TMP/heavybag-test-ua-parse"
 if "$CC" -DHEAVYBAG_UA_PARSE_UNIT_TEST $COMMON "$DIR/test_heavybag_ua_parse.c" -o "$BIN_UA"; then

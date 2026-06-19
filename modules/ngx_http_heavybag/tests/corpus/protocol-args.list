@@ -1,0 +1,15 @@
+# Controlled query-arg signature list for the Phase 6 protocol/decode harness
+# (tests/run-protocol-tests.sh). NOT a production list -- the patterns are
+# chosen so each percent-decode edge case in ngx_http_heavybag_sig_lookup_decoded
+# (module.c:856) + ngx_unescape_uri(type=0) (module.c:873) maps to an unambiguous
+# (status,reason) verdict. r->args is %-decoded EXACTLY ONCE, then matched
+# case-insensitively (the single-pass contract, match-01).
+#
+# Two patterns, two distinct actions, so a hit's action proves WHICH pattern
+# fired (no first-match ambiguity across the file):
+#   union   -> 403   (a bare substring: isolates the DECODE transform)
+#   'union  -> 404   (literal apostrophe prefix: isolates SINGLE-PASS decode --
+#                     a double-encoded %2527union decodes once to "%27union",
+#                     which lacks the literal quote and must NOT match)
+union    403
+'union   404
