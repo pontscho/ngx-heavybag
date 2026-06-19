@@ -10,7 +10,7 @@
  *
  * REAL PCRE2 is linked (-lpcre2-8): the round-2 ReDoS match/depth-limit fix
  * (ngx_http_heavybag_regex_exec) is exercised end-to-end against pcre2_match(),
- * NOT a mock -- a mocked engine would make the fail-open assertion a tautology.
+ * NOT a mock -- a mocked engine would make the fail-closed assertion a tautology.
  * Built + run by run-unit-tests.sh with `cc -DHEAVYBAG_MATCH_UNIT_TEST ... -lpcre2-8`.
  *
  * The static next_line tokenizer, compile_bucket and the bounded-exec helper
@@ -262,37 +262,45 @@ CTEST(match, alternation_second_pattern_matches)
     ASSERT_EQUAL(NGX_HTTP_FORBIDDEN, lookup(re, "/aaa"));
 }
 
-CTEST(match, redos_failopen_bounded)
+CTEST(match, redos_failclosed_bounded)
 {
     /*
-     * The round-2 fix: ngx_http_heavybag_regex_exec runs pcre2_match() with an
-     * EXPLICIT module match/depth limit (HEAVYBAG_PCRE2_MATCH_LIMIT=100000,
-     * _DEPTH_LIMIT=1000), far below PCRE2's built-in 10,000,000 default match
-     * limit. The pattern is NOT JIT-compiled (the shim's ngx_regex_compile
-     * calls only pcre2_compile), so pcre2_match() uses the interpreter and the
-     * match/depth limits are honoured. Two things are asserted:
+     * The round-2 fix + finding-#1 hardening: ngx_http_heavybag_regex_exec runs
+     * pcre2_match() with an EXPLICIT module match/depth limit
+     * (HEAVYBAG_PCRE2_MATCH_LIMIT=100000, _DEPTH_LIMIT=1000), far below PCRE2's
+     * built-in 10,000,000 default. A subject the bounded engine cannot finish
+     * judging now returns HEAVYBAG_RE_ERROR (NOT a no-match) and the lookup
+     * fails CLOSED -- the subject is treated as a hit instead of being silently
+     * passed as clean (the detection-bypass finding #1). The pattern is NOT
+     * JIT-compiled (the shim's ngx_regex_compile calls only pcre2_compile), so
+     * pcre2_match() uses the interpreter and the limits are honoured. Asserted:
      *
-     *  (1) terminal fail-open smoke: a heavily catastrophic input (40 'a's)
-     *      yields a negative rc (no-match class) and the full lookup fails open
-     *      to DECLINED -- no false block, CPU bounded, the test TERMINATES.
+     *  (1) terminal fail-CLOSED: a heavily catastrophic input (40 'a's) trips
+     *      the module limit -> HEAVYBAG_RE_ERROR, and the full lookup returns
+     *      the bucket's action (403) -- the crafted subject is BLOCKED, CPU
+     *      bounded, the test TERMINATES.
      *
      *  (2) LOAD-BEARING discrimination: a subject tuned so its backtracking
      *      cost sits BETWEEN the module's 100k limit and PCRE2's 10M default.
-     *      A DEFAULT match context (mctx=NULL) completes the backtracking and
-     *      returns EXACTLY PCRE2_ERROR_NOMATCH (-1) -- proving the input is
-     *      under both the default match AND depth budget -- while the MODULE
-     *      context trips MATCHLIMIT or DEPTHLIMIT (never NOMATCH) on the SAME
-     *      input. If pcre2_set_match_limit/_depth_limit were removed or
-     *      inflated, the module context would also return NOMATCH and assert
-     *      (2) would FAIL. That is what makes this test guard the fix instead
-     *      of being a tautology: the 10M default alone already trips at 40 'a's,
-     *      so a `rc < 0` check proves nothing about the module's tighter bound.
+     *      A DEFAULT match context (mctx=NULL) completes and returns EXACTLY
+     *      PCRE2_ERROR_NOMATCH (-1) -- proving the input is under both default
+     *      budgets -- while the MODULE context trips the limit, so regex_exec
+     *      returns HEAVYBAG_RE_ERROR (never NOMATCH) on the SAME input. If
+     *      pcre2_set_match_limit/_depth_limit were removed or inflated, the
+     *      module context would also reach NOMATCH and regex_exec would return
+     *      HEAVYBAG_RE_NOMATCH -- failing this assert. That is what makes the
+     *      test guard the fix instead of being a tautology: the 10M default
+     *      alone already trips at 40 'a's, so a bare "< 0" check proves nothing
+     *      about the module's tighter bound.
+     *
+     *  (3) NOT silent: the ERROR path bumps the limit counter (the warn hook),
+     *      so a blown budget is always surfaced, never swallowed.
      */
     ngx_regex_t       *re[HEAVYBAG_ACTION_MAX] = { 0 };
     ngx_str_t          subj;
     u_char             evil[64];
     pcre2_match_data  *dmd;
-    int                default_rc, module_rc;
+    int                default_rc;
     /* N tuned so the (a+)+$ backtracking cost on N 'a's + 'X' lands strictly
      * between the module's 100k and PCRE2's 10M match budget. Verified by the
      * control assert below: at this N the default context returns exactly -1. */
@@ -300,14 +308,19 @@ CTEST(match, redos_failopen_bounded)
 
     ASSERT_EQUAL(NGX_OK, compile("(a+)+$ 403\n", re));
 
-    /* (1) terminal fail-open smoke: deeply catastrophic, trips the module limit */
+    /* (1) terminal fail-CLOSED: deeply catastrophic, trips the module limit */
+    heavybag_ut_regex_limit_count = 0;
     memset(evil, 'a', 40);
     evil[40] = 'X';
     subj.data = evil;
     subj.len = 41;
-    ASSERT_TRUE(ngx_http_heavybag_regex_exec(re[HEAVYBAG_ACTION_403], &subj) < 0);
-    /* full lookup path fails open to DECLINED (no false block from a blown limit) */
-    ASSERT_EQUAL(NGX_DECLINED, ngx_http_heavybag_scanner_lookup(re, &subj));
+    ASSERT_EQUAL(HEAVYBAG_RE_ERROR,
+                 ngx_http_heavybag_regex_exec(re[HEAVYBAG_ACTION_403], &subj));
+    /* (3) the blown limit was surfaced, not swallowed */
+    ASSERT_TRUE(heavybag_ut_regex_limit_count >= 1u);
+    /* full lookup path fails CLOSED to the bucket action (no silent clean pass) */
+    ASSERT_EQUAL(NGX_HTTP_FORBIDDEN,
+                 ngx_http_heavybag_scanner_lookup(re, &subj));
 
     /* (2) discrimination vector: N 'a's + 'X' (cost between 100k and 10M) */
     memset(evil, 'a', N);
@@ -326,16 +339,41 @@ CTEST(match, redos_failopen_bounded)
     pcre2_match_data_free(dmd);
     ASSERT_EQUAL(PCRE2_ERROR_NOMATCH, default_rc);   /* exactly -1, not just < 0 */
 
-    /* load-bearing: the MODULE context's tighter limit trips on the SAME input.
-     * (a+)+ may hit the 1000 depth limit before the 100k match limit, so accept
-     * either MATCHLIMIT or DEPTHLIMIT -- both are distinct from NOMATCH and both
-     * mean "the module bounded the backtracking the default context did not". */
-    module_rc = (int) ngx_http_heavybag_regex_exec(re[HEAVYBAG_ACTION_403], &subj);
-    ASSERT_TRUE(module_rc == PCRE2_ERROR_MATCHLIMIT
-                || module_rc == PCRE2_ERROR_DEPTHLIMIT);
+    /* load-bearing: the MODULE context's tighter limit trips on the SAME input,
+     * so regex_exec reports ERROR (distinct from the default's clean NOMATCH).
+     * Remove/inflate the module limit and this becomes HEAVYBAG_RE_NOMATCH. */
+    ASSERT_EQUAL(HEAVYBAG_RE_ERROR,
+                 ngx_http_heavybag_regex_exec(re[HEAVYBAG_ACTION_403], &subj));
 
     /* positive control: the limit never clips a genuine match */
     ASSERT_EQUAL(NGX_HTTP_FORBIDDEN, lookup(re, "aaaa"));
+}
+
+
+CTEST(match, regex_exec_tristate_clean_paths)
+{
+    /*
+     * The fail-closed change must NOT turn a clean evaluable no-match into a
+     * block: a benign subject still returns NOMATCH and the lookup DECLINES;
+     * a genuine match still returns MATCH. Guards against over-correcting
+     * finding #1 into a blanket fail-closed.
+     */
+    ngx_regex_t  *re[HEAVYBAG_ACTION_MAX] = { 0 };
+    ngx_str_t     subj;
+
+    ASSERT_EQUAL(NGX_OK, compile("^/admin 403\n", re));
+
+    subj.data = (u_char *) "/public";
+    subj.len = sizeof("/public") - 1;
+    ASSERT_EQUAL(HEAVYBAG_RE_NOMATCH,
+                 ngx_http_heavybag_regex_exec(re[HEAVYBAG_ACTION_403], &subj));
+    ASSERT_EQUAL(NGX_DECLINED, ngx_http_heavybag_scanner_lookup(re, &subj));
+
+    subj.data = (u_char *) "/admin";
+    subj.len = sizeof("/admin") - 1;
+    ASSERT_EQUAL(HEAVYBAG_RE_MATCH,
+                 ngx_http_heavybag_regex_exec(re[HEAVYBAG_ACTION_403], &subj));
+    ASSERT_EQUAL(NGX_HTTP_FORBIDDEN, ngx_http_heavybag_scanner_lookup(re, &subj));
 }
 
 
