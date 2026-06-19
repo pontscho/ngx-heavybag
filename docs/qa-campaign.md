@@ -772,4 +772,35 @@ Closes the critic's third un-probed surface. `ngx_http_heavybag_ua_spoof_eval()`
 
 **Verdict:** **no production defect.** The mismatch matrix is exact and symmetric, both UNKNOWN guards suppress false positives, observe/detect downgrade correctly, and the cidr_signal fires (and wins over fake-bot) as designed. Purely additive: **no `src/*.c`/`*.h` edited; deployed SSL `.so` md5 `03a216df17d1661854e8287045050eb8` unchanged**. New files: `tests/run-spoof-fuzz.sh`, `tests/heavybag-spoof-fuzz.conf`, +1 CTest registration (`heavybag_spoof`; CTest count 12 -> 13). (One test-harness bug was caught + fixed during the run: the error-log filter initially flagged benign `[notice] worker process ... exited with code 0` reload lines; narrowed to non-zero exits / signals only.)
 
-**Still un-probed (optional):** only stat_cc table saturation remains (513+ distinct country codes exhaust the 512-slot open-addressed `cc[]` table -> the `cc_overflow` silent-drop path at `module.c:595`). Green-but-shallow, not a known bug; best exercised at the unit layer with a synthetic shm (needs a `heavybag_status` header-split), so deferred. **3 of the critic's 4 un-probed surfaces are now closed.**
+**Still un-probed (optional):** only stat_cc table saturation remains (513+ distinct country codes exhaust the 512-slot open-addressed `cc[]` table -> the `cc_overflow` silent-drop path). Best exercised at the unit layer with a synthetic shm (needs a `heavybag_status` header-split), so deferred to its own round -- see below.
+
+---
+
+## Optional round — stat_cc table saturation (2026-06-19)
+
+Closes the critic's fourth (and final) un-probed surface. `ngx_http_heavybag_stat_cc_bump()` is a lock-free, open-addressed, linear-probe table of `HEAVYBAG_STAT_CC_SLOTS` (512) `{cc16,total,blocked}` slots. With real geo data the distinct-CC count tops out at ~249 + a handful of libloc specials, so the slot-collision probe and the `cc_overflow` drop are **unreachable at the integration layer** (you cannot inject 513 distinct country codes from a real DB) -- they need a synthetic in-memory shm, i.e. the unit layer.
+
+**This is the only round that touches production source** (the prior three were test-only). To unit-test the *real* function (not a tautological copy), `ngx_http_heavybag_stat_cc_bump` was **relocated from `ngx_http_heavybag_module.c` to `heavybag_status.c`** -- the status TU already owns the `cc[]` layout, so this is its correct home -- and `heavybag_status.h` was **header-split** into the 3-region shim pattern used by rate/geo/match (`-DHEAVYBAG_STAT_CC_UNIT_TEST` -> nginx-free type + atomic shim). The function body is byte-identical; only its TU moved. `module.c`'s 18 call sites + the stream head resolve it via the `heavybag_rep.h` prototype, now linking to `heavybag_status.o`.
+
+**Coverage:** new `tests/unit/test-stat-cc.c` (suite `stat_cc`, 15 vectors), wired into `run-unit-tests.sh` (no extra libs; part of the existing `heavybag_unit` CTest). Unit suite 148 -> 163.
+
+| # | Vector | Asserts |
+|---|---|---|
+| V1 | NULL shm | no-op, no crash |
+| V2 | cc16==0 sentinel | never consumes a slot, cc_overflow stays 0 |
+| V3-V4 | single allowed / blocked bump | total/blocked correct |
+| V5 | repeated same CC | accumulates in ONE slot |
+| V6 | two distinct CCs, no collision | independent slots + counts |
+| V7 | **collision** (257 & 769, same %512) | first claims home slot 257, second linear-probes to 258, no cross-poisoning |
+| V8 | **probe wraps** (511 & 1023) | high-slot collision wraps to slot 0 |
+| V9 | 3-CC collision chain | three probes to three adjacent slots |
+| V10 | **saturation** (fill 512, then 513th) | `cc_overflow`++, 513th NOT stored, table uncorrupted |
+| V11 | full table + EXISTING CC | still found + counted (not an overflow) |
+| V12 | overflow accumulates | 3 distinct over-capacity CCs -> cc_overflow==3 |
+| V13 | blocked subset of total | mixed sequence accounting |
+| V14 | max uint16 cc16=0xFFFF | slot 511, works |
+| V15 | realistic packed ISO-2 codes | US/FR/DE/AU/JP/GB/CA/NL all land, no overflow |
+
+**Verdict:** **no production defect.** The collision probe, wrap-around, saturation drop, and full-table-existing-CC paths all behave exactly as documented; the overflow is a clean drop (`cc_overflow`++), never a slot corruption. The relocation is binary-compatible and runtime-identical -- **the full 13-test CTest suite passes against the rebuilt `.so`** (including `heavybag_stat`, which exercises the live per-country cc_bump path). The deployed SSL `.so` md5 changed `03a216df17d1661854e8287045050eb8` -> `a889e9163dbe503b34596c033c79dddf` (a real functional rebuild from the TU move, behaviour-identical, verified by the suite). Files: `src/heavybag_status.{c,h}` (relocate + header-split), `src/ngx_http_heavybag_module.c` (cc_bump removed -> pointer comment), `tests/unit/test-stat-cc.c` (new), `tests/unit/run-unit-tests.sh` (+1 stanza). No new CTest registration (folds into `heavybag_unit`).
+
+**ALL 4 of the critic's un-probed deep-fuzz surfaces are now closed** (authhttp SMTP, reputation verdict-precedence, JA4<->UA spoof self-swap, stat_cc saturation). Each found **no production defect** -- the campaign's Discovery verdict (zero attacker-triggerable memory-corruption / crash / security bypass) holds across the full deep-fuzz sweep.

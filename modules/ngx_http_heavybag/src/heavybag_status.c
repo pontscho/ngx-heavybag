@@ -14,12 +14,77 @@
  * database path or build host. No client IP / PII is ever emitted.
  */
 
+#include "heavybag_status.h"
+
+#ifndef HEAVYBAG_STAT_CC_UNIT_TEST
 #include "ngx_http_heavybag.h"
 #include "heavybag_geo.h"
-#include "heavybag_status.h"
 #include "heavybag_rate.h"
 #include "heavybag_ua_parse.h"
+#else
+/*
+ * Unit-test runtime shim (-DHEAVYBAG_STAT_CC_UNIT_TEST): the cc-table core uses
+ * only these two atomic ops. Single-threaded test, but real __sync builtins so
+ * the cmp_set/fetch_add semantics match production rather than a hand-rolled
+ * fake. Everything below the cc core is nginx-coupled and is compiled out.
+ */
+#define ngx_atomic_cmp_set(lock, old, set)  __sync_bool_compare_and_swap(lock, old, set)
+#define ngx_atomic_fetch_add(value, add)    __sync_fetch_and_add(value, add)
+#endif
 
+
+/*
+ * Lock-free per-country counter bump (open-addressed, linear probe). cc16==0
+ * is the empty-slot sentinel (no real ISO-2 code packs to 0), claimed once
+ * with ngx_atomic_cmp_set; a lost race re-reads the winner and reuses the
+ * slot if it matches. A full table bumps cc_overflow and drops the sample
+ * rather than corrupt a slot. Shared by both heads (the STREAM head enters
+ * here through the opaque pointer, never seeing the layout struct). NULL
+ * zone is a no-op. Lives in the status TU (it owns the cc[] layout) and is
+ * isolated for the test by HEAVYBAG_STAT_CC_UNIT_TEST; the rest of this file is
+ * the nginx-coupled serializers + content handler, compiled out under the test.
+ */
+void
+ngx_http_heavybag_stat_cc_bump(void *shm, uint16_t cc16, ngx_uint_t blocked)
+{
+    ngx_uint_t                probe, slot;
+    ngx_atomic_uint_t         cur;
+    ngx_http_heavybag_stat_cc_t   *cc;
+    ngx_http_heavybag_stat_shm_t  *sh = shm;
+
+    if (sh == NULL || cc16 == 0) {
+        return;
+    }
+
+    slot = (ngx_uint_t) cc16 % HEAVYBAG_STAT_CC_SLOTS;
+
+    for (probe = 0; probe < HEAVYBAG_STAT_CC_SLOTS; probe++) {
+        cc = &sh->cc[(slot + probe) % HEAVYBAG_STAT_CC_SLOTS];
+
+        cur = cc->cc16;
+        if (cur == 0) {
+            if (ngx_atomic_cmp_set(&cc->cc16, 0, cc16)) {
+                cur = cc16;             /* we claimed this empty slot */
+            } else {
+                cur = cc->cc16;         /* lost the race; read the winner */
+            }
+        }
+
+        if (cur == cc16) {
+            (void) ngx_atomic_fetch_add(&cc->total, 1);
+            if (blocked) {
+                (void) ngx_atomic_fetch_add(&cc->blocked, 1);
+            }
+            return;
+        }
+        /* slot owned by another country: probe the next one */
+    }
+
+    (void) ngx_atomic_fetch_add(&sh->cc_overflow, 1);
+}
+
+
+#ifndef HEAVYBAG_STAT_CC_UNIT_TEST
 
 #define HEAVYBAG_STAT_FMT_PLAIN       0
 #define HEAVYBAG_STAT_FMT_JSON        1
@@ -803,3 +868,5 @@ ngx_http_heavybag_status_handler(ngx_http_request_t *r)
 
     return ngx_http_output_filter(r, &out);
 }
+
+#endif /* HEAVYBAG_STAT_CC_UNIT_TEST */

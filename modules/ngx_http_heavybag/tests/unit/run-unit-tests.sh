@@ -83,4 +83,13 @@ else
     echo "match unit test COMPILE FAILED"; rc=1
 fi
 
+# ---- per-country stat-table core (open-addressed cc[] + cc_overflow) -----
+BIN_STATCC="$TMP/heavybag-test-stat-cc"
+if "$CC" -DHEAVYBAG_STAT_CC_UNIT_TEST $COMMON "$DIR/test-stat-cc.c" -o "$BIN_STATCC"; then
+    echo "== per-country stat-table core =="
+    "$BIN_STATCC" "$@" || rc=1
+else
+    echo "stat-cc unit test COMPILE FAILED"; rc=1
+fi
+
 exit $rc

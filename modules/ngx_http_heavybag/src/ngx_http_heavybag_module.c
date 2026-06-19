@@ -548,52 +548,10 @@ ngx_http_heavybag_postread_handler(ngx_http_request_t *r)
 
 
 /*
- * Lock-free per-country counter bump (open-addressed, linear probe). cc16==0
- * is the empty-slot sentinel (no real ISO-2 code packs to 0), claimed once
- * with ngx_atomic_cmp_set; a lost race re-reads the winner and reuses the
- * slot if it matches. A full table bumps cc_overflow and drops the sample
- * rather than corrupt a slot. Shared by both heads (the STREAM head enters
- * here through the opaque pointer, never seeing the layout struct). NULL
- * zone is a no-op.
+ * ngx_http_heavybag_stat_cc_bump() lives in heavybag_status.c (the status TU owns
+ * the cc[] layout). Declared in heavybag_rep.h; isolated for unit testing via
+ * HEAVYBAG_STAT_CC_UNIT_TEST (tests/unit/test-stat-cc.c).
  */
-void
-ngx_http_heavybag_stat_cc_bump(void *shm, uint16_t cc16, ngx_uint_t blocked)
-{
-    ngx_uint_t                probe, slot;
-    ngx_atomic_uint_t         cur;
-    ngx_http_heavybag_stat_cc_t   *cc;
-    ngx_http_heavybag_stat_shm_t  *sh = shm;
-
-    if (sh == NULL || cc16 == 0) {
-        return;
-    }
-
-    slot = (ngx_uint_t) cc16 % HEAVYBAG_STAT_CC_SLOTS;
-
-    for (probe = 0; probe < HEAVYBAG_STAT_CC_SLOTS; probe++) {
-        cc = &sh->cc[(slot + probe) % HEAVYBAG_STAT_CC_SLOTS];
-
-        cur = cc->cc16;
-        if (cur == 0) {
-            if (ngx_atomic_cmp_set(&cc->cc16, 0, cc16)) {
-                cur = cc16;             /* we claimed this empty slot */
-            } else {
-                cur = cc->cc16;         /* lost the race; read the winner */
-            }
-        }
-
-        if (cur == cc16) {
-            (void) ngx_atomic_fetch_add(&cc->total, 1);
-            if (blocked) {
-                (void) ngx_atomic_fetch_add(&cc->blocked, 1);
-            }
-            return;
-        }
-        /* slot owned by another country: probe the next one */
-    }
-
-    (void) ngx_atomic_fetch_add(&sh->cc_overflow, 1);
-}
 
 
 /*
