@@ -221,6 +221,19 @@ static ngx_command_t  ngx_http_heavybag_commands[] = {
       offsetof(ngx_http_heavybag_loc_conf_t, spoof_block),
       NULL },
 
+    /* waf_mail_failopen on|off: governs the SMTP auth_http endpoint's behaviour
+     * when a TRUSTED peer sends a missing / unparseable Client-IP. Default on
+     * keeps the historic fail-OPEN (allow + WARN, never break mail delivery on
+     * a malformed header). off makes that single edge fail CLOSED (deny) for
+     * operators who would rather drop an unattributable mail auth than let it
+     * through unjudged. Default on preserves backward compatibility. */
+    { ngx_string("waf_mail_failopen"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_heavybag_loc_conf_t, mail_failopen),
+      NULL },
+
     /* waf_allowlist_scope full|reputation: how far a waf_allowlist CIDR hit
      * short-circuits the pipeline (full = skip every stage; default full). */
     { ngx_string("waf_allowlist_scope"),
@@ -1338,6 +1351,7 @@ ngx_http_heavybag_create_loc_conf(ngx_conf_t *cf)
     conf->bot_block = NGX_CONF_UNSET;
     conf->fake_bot_block = NGX_CONF_UNSET;
     conf->spoof_block = NGX_CONF_UNSET;
+    conf->mail_failopen = NGX_CONF_UNSET;
     conf->allowlist_scope = NGX_CONF_UNSET_UINT;
     conf->reason_header = NGX_CONF_UNSET;
 
@@ -1365,6 +1379,8 @@ ngx_http_heavybag_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_value(conf->bot_block, prev->bot_block, 0);
     ngx_conf_merge_value(conf->fake_bot_block, prev->fake_bot_block, 0);
     ngx_conf_merge_value(conf->spoof_block, prev->spoof_block, 0);
+    /* default ON: preserve the historic fail-OPEN on a bad mail Client-IP */
+    ngx_conf_merge_value(conf->mail_failopen, prev->mail_failopen, 1);
     ngx_conf_merge_uint_value(conf->allowlist_scope, prev->allowlist_scope,
                               HEAVYBAG_ALLOWLIST_FULL);
     ngx_conf_merge_value(conf->reason_header, prev->reason_header, 0);

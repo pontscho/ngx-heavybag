@@ -108,6 +108,7 @@ typedef struct {
     ngx_str_t                      verified_bot_list[HEAVYBAG_UA_LIST_MAX];
     ngx_flag_t                     fake_bot_block; /* waf_fake_bot_block on|off */
     ngx_flag_t                     spoof_block;  /* waf_spoof_block on|off (UA<->JA4) */
+    ngx_flag_t                     mail_failopen; /* waf_mail_failopen on|off (SMTP auth) */
 
     /* args/cookie/referer signatures: one action-bucketed row per subject */
     ngx_str_t        sig_list[HEAVYBAG_SIG_LIST_MAX];   /* dup-guard / merge sentinel */

@@ -16,6 +16,7 @@
 #   #6 geo / asn / flag verdict    -> Auth-Status carries the non-blocklist reason
 #   #7 missing waf_mail_backend    -> ERR-log-but-allow, no Auth-Server/Auth-Port
 #   #8 rate + geo rule-select      -> for_geo=CC rule chosen via verdict.geo_valid
+#   #9 waf_mail_failopen off       -> missing/garbage Client-IP fails CLOSED (deny)
 #
 # Geo-dependent edges (#6/#8) self-validate ground truth at runtime via the
 # oracle reference/geolookup.c against geodb/location.db; if the DB is absent or
@@ -287,6 +288,34 @@ if [ "$GEO_OK" -eq 1 ]; then
 else
     skp "#8 rate+geo rule-select: oracle/geodb unavailable or drifted"
 fi
+
+# ============================================================================
+echo "================  #9 waf_mail_failopen off -> fail-CLOSED  ==========="
+# With waf_mail_failopen off, a missing / unparseable Client-IP from the
+# trusted loopback peer must DENY (the synthetic reason "mail client-ip
+# missing"), NOT fail open. heavybag_authhttp.c:68-90.
+r=$(probe 28609)
+[ "$(astat "$r")" = 'mail client-ip missing' ] \
+    && ok "#9 failopen-off + missing Client-IP -> deny 'mail client-ip missing'" \
+    || bad "#9 failopen-off + missing Client-IP -> '$(astat "$r")' (want 'mail client-ip missing')"
+r=$(probe 28609 -H 'Client-IP: not-an-ip')
+[ "$(astat "$r")" = 'mail client-ip missing' ] \
+    && ok "#9 failopen-off + garbage Client-IP -> deny (fail-closed)" \
+    || bad "#9 failopen-off + garbage Client-IP -> '$(astat "$r")' (want 'mail client-ip missing')"
+sleep 0.2
+grep -q 'denying (waf_mail_failopen off)' "$ELOG" \
+    && ok "#9 fail-closed logged the deny WARN" \
+    || bad "#9 expected WARN 'denying (waf_mail_failopen off)' not in log"
+# control: a well-formed Client-IP still judges normally (knob governs only the
+# missing/garbage edge) -- benign allowed, blocklisted denied.
+r=$(probe 28609 -H 'Client-IP: 8.8.8.8')
+[ "$(astat "$r")" = ok ] \
+    && ok "#9 failopen-off + benign well-formed Client-IP -> OK (happy path intact)" \
+    || bad "#9 failopen-off + benign Client-IP -> '$(astat "$r")' (want ok)"
+r=$(probe 28609 -H 'Client-IP: 203.0.113.7')
+[ "$(astat "$r")" = 'static blocklist' ] \
+    && ok "#9 failopen-off + blocklisted Client-IP -> 'static blocklist' (normal deny intact)" \
+    || bad "#9 failopen-off + blocklisted Client-IP -> '$(astat "$r")' (want 'static blocklist')"
 
 # ============================================================================
 echo "================  worker liveness + error.log clean  ================"
