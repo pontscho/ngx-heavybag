@@ -484,6 +484,164 @@ CTEST(rate, max_rate_no_overflow_lossless_downcast)
     free(hdr);
 }
 
+/* ======================================================================= *
+ *  V17  (M1 fix) probe window full of FRESH slots -> the newcomer must NOT  *
+ *  evict any live limiter: it fails OPEN and the saturation is COUNTED in   *
+ *  rate_overflow. Every existing slot stays byte-for-byte intact. This is   *
+ *  the core of the self-reset-bypass fix: an established abuser can no       *
+ *  longer be (and cannot make a victim be) evicted while still fresh.        *
+ * ======================================================================= */
+CTEST(rate, window_full_all_fresh_failopen_counts)
+{
+    ngx_http_heavybag_rate_hdr_t  *hdr = mk_table(64);
+    struct sockaddr_in             sin;
+    uint64_t                       h;
+    ngx_uint_t                     idx, p;
+    ngx_http_heavybag_rate_slot_t *slots, *got;
+    uint32_t                       now32;
+    const uint64_t                 base = 10000000ULL;
+    uint64_t                       saved_key[HEAVYBAG_RATE_PROBE_MAX];
+    uint64_t                       saved_state[HEAVYBAG_RATE_PROBE_MAX];
+
+    mk_v4(&sin, "192.0.2.124");
+    h = ngx_http_heavybag_rate_key((struct sockaddr *) &sin);
+    idx = (ngx_uint_t) (h % hdr->nslots);
+    slots = slots_of(hdr);
+    now32 = (uint32_t) base;
+
+    /* fill the entire 32-slot probe window with FRESH foreign slots: ages
+     * 10..41 ms, all well under the 1000 ms (R_PER) staleness floor, so none
+     * is an eviction candidate. */
+    for (p = 0; p < HEAVYBAG_RATE_PROBE_MAX; p++) {
+        ngx_http_heavybag_rate_slot_t  *s = &slots[(idx + p) % hdr->nslots];
+        s->key = (uint64_t) (0xB000U + p);                 /* nonzero, != h */
+        s->state = ((uint64_t) (now32 - (10U + p)) << 32) | 3333U;
+        saved_key[p] = s->key;
+        saved_state[p] = s->state;
+    }
+
+    ngx_current_msec = base;
+    /* the new IP fails OPEN (no stale victim to evict) ... */
+    ASSERT_EQUAL(NGX_OK,
+        ngx_http_heavybag_rate_check(hdr, (struct sockaddr *) &sin,
+                                     R_NUM, R_PER, R_BURST));
+    /* ... but the saturation event is COUNTED (the only signal of the attack) */
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rate_overflow(hdr));
+    /* our key was NOT installed anywhere in the window */
+    got = find_slot(hdr, h);
+    ASSERT_NULL(got);
+    /* every existing fresh slot is byte-for-byte untouched */
+    for (p = 0; p < HEAVYBAG_RATE_PROBE_MAX; p++) {
+        ngx_http_heavybag_rate_slot_t  *s = &slots[(idx + p) % hdr->nslots];
+        ASSERT_EQUAL_U(saved_key[p], s->key);
+        ASSERT_EQUAL_U(saved_state[p], s->state);
+    }
+    free(hdr);
+}
+
+
+/* ======================================================================= *
+ *  V18  (M1 fix) a DEPLETED bucket with a recently frozen stamp (the exact  *
+ *  self-reset target: tok=0, ts frozen because added==0 kept the old stamp) *
+ *  must NOT be reset to a full burst by ANOTHER IP's probe while it is still *
+ *  younger than one period. The abuser stays throttled; the prober fails    *
+ *  open and counts.                                                          *
+ * ======================================================================= */
+CTEST(rate, fresh_depleted_bucket_not_reset_by_other_ip)
+{
+    ngx_http_heavybag_rate_hdr_t  *hdr = mk_table(64);
+    struct sockaddr_in             attacker;
+    uint64_t                       h_atk;
+    ngx_uint_t                     idx, p;
+    ngx_http_heavybag_rate_slot_t *slots, *victim;
+    uint32_t                       now32;
+    uint64_t                       victim_key, victim_state;
+    const uint64_t                 base = 10000000ULL;
+
+    mk_v4(&attacker, "192.0.2.125");
+    h_atk = ngx_http_heavybag_rate_key((struct sockaddr *) &attacker);
+    idx = (ngx_uint_t) (h_atk % hdr->nslots);
+    slots = slots_of(hdr);
+    now32 = (uint32_t) base;
+
+    /* the established abuser's slot: depleted (tok=0), stamp frozen 50 ms ago
+     * (<< 1000 ms period). */
+    victim = &slots[(idx + 7) % hdr->nslots];
+    victim_key = 0xC0FFEEULL;                              /* != h_atk */
+    victim_state = ((uint64_t) (now32 - 50U) << 32) | 0U;  /* depleted bucket */
+    victim->key = victim_key;
+    victim->state = victim_state;
+
+    /* saturate the remaining window with other fresh foreign slots */
+    for (p = 0; p < HEAVYBAG_RATE_PROBE_MAX; p++) {
+        ngx_http_heavybag_rate_slot_t  *s = &slots[(idx + p) % hdr->nslots];
+        if (s == victim) {
+            continue;
+        }
+        s->key = (uint64_t) (0xD000U + p);                 /* nonzero, != h_atk */
+        s->state = ((uint64_t) (now32 - (20U + p)) << 32) | 2222U;
+    }
+
+    ngx_current_msec = base;
+    /* a DIFFERENT IP probes: it cannot evict the fresh depleted bucket */
+    ASSERT_EQUAL(NGX_OK,
+        ngx_http_heavybag_rate_check(hdr, (struct sockaddr *) &attacker,
+                                     R_NUM, R_PER, R_BURST));
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rate_overflow(hdr));
+    /* the abuser's bucket is byte-for-byte intact: still tok=0, same frozen ts */
+    ASSERT_EQUAL_U(victim_key, victim->key);
+    ASSERT_EQUAL_U(victim_state, victim->state);
+    ASSERT_EQUAL_U(0U, tok_of(victim));
+    free(hdr);
+}
+
+
+/* ======================================================================= *
+ *  V19  (M1 fix) the staleness floor is a FLOOR, not a wall: a slot aged    *
+ *  just past one full period (here 1200 ms > 1000 ms) is still a legitimate *
+ *  eviction target even when the rest of the window is fresh. It is taken    *
+ *  over and overflow is NOT counted (a successful eviction).                 *
+ * ======================================================================= */
+CTEST(rate, slot_older_than_period_still_evictable)
+{
+    ngx_http_heavybag_rate_hdr_t  *hdr = mk_table(64);
+    struct sockaddr_in             sin;
+    uint64_t                       h;
+    ngx_uint_t                     idx, p;
+    ngx_http_heavybag_rate_slot_t *slots, *stale;
+    uint32_t                       now32;
+    const uint64_t                 base = 10000000ULL;
+
+    mk_v4(&sin, "192.0.2.126");
+    h = ngx_http_heavybag_rate_key((struct sockaddr *) &sin);
+    idx = (ngx_uint_t) (h % hdr->nslots);
+    slots = slots_of(hdr);
+    now32 = (uint32_t) base;
+
+    /* fill the window with FRESH foreign slots (ages 5..36 ms < period) ... */
+    for (p = 0; p < HEAVYBAG_RATE_PROBE_MAX; p++) {
+        ngx_http_heavybag_rate_slot_t  *s = &slots[(idx + p) % hdr->nslots];
+        s->key = (uint64_t) (0xE000U + p);                 /* nonzero, != h */
+        s->state = ((uint64_t) (now32 - (5U + p)) << 32) | 1234U;
+    }
+    /* ... except slot p==9, aged just past one full period (1200 ms): the
+     * single legitimate eviction target. */
+    stale = &slots[(idx + 9) % hdr->nslots];
+    stale->state = ((uint64_t) (now32 - (R_PER + 200U)) << 32) | 4242U;
+
+    ngx_current_msec = base;
+    ASSERT_EQUAL(NGX_OK,
+        ngx_http_heavybag_rate_check(hdr, (struct sockaddr *) &sin,
+                                     R_NUM, R_PER, R_BURST));
+    /* the stale slot was repurposed for our key, full bucket minus one spent */
+    ASSERT_EQUAL_U(h, stale->key);
+    ASSERT_EQUAL_U(R_BURST - HEAVYBAG_RATE_SCALE, tok_of(stale));
+    /* a successful eviction -> NO overflow counted */
+    ASSERT_EQUAL_U(0U, ngx_http_heavybag_rate_overflow(hdr));
+    free(hdr);
+}
+
+
 
 int
 main(int argc, const char *argv[])
