@@ -7,11 +7,20 @@
  * default plain) and renders the counter model. Runs in the CONTENT phase,
  * so the ACCESS phase (allow/deny) is enforced before any counter is shown.
  *
- * SECURITY: every attacker-influenceable byte (geo-DB country codes, server
- * names) is escaped UNCONDITIONALLY at the serializer boundary - JSON per
- * RFC 8259, Prometheus label values per the text-exposition rules. The geo
- * health block exposes only the network count and mapped size, never the
- * database path or build host. No client IP / PII is ever emitted.
+ * SECURITY -- what is and is NOT safe to emit, per source:
+ *   - geo-DB country codes are SANITIZED to [A-Z0-9] (ngx_http_heavybag_cc_chars,
+ *     any other byte -> '?') before output, in EVERY format -- a hostile DB
+ *     byte can never reach the wire.
+ *   - server_name is operator config, not attacker-influenceable. The
+ *     machine-readable formats still escape it at the boundary (JSON per
+ *     RFC 8259 via ngx_escape_json; Prometheus label values via
+ *     ngx_http_heavybag_prom_escape) so a regex/quoted name cannot break the
+ *     document. The PLAIN format is a human/debug view and prints the name
+ *     verbatim -- it is not a parser target.
+ *   - reason / type / category labels are compile-time ASCII constants
+ *     (heavybag_reason_str[] etc.), so they need no escaping.
+ *   - The geo health block exposes only the network count and mapped size,
+ *     never the database path or build host. No client IP / PII is ever emitted.
  */
 
 #include "heavybag_status.h"
@@ -561,8 +570,12 @@ ngx_http_heavybag_status_json(u_char *p, u_char *last,
         name = &cscfp[idx]->server_name;
 
         p = ngx_snprintf(p, last - p, "%s{\"server\":\"", idx ? "," : "");
-        need = ngx_escape_json(NULL, name->data, name->len);   /* measured escaped len */
-        if ((size_t) (last - p) >= need) {
+        /* ngx_escape_json(NULL,...) returns the EXTRA bytes escaping adds, not
+         * the total -- the write consumes name->len + need. (bufsize already
+         * over-allocates 6*name.len per vhost, so this guard never trips; it is
+         * a correct belt on top of that proven bound, not the bound itself.) */
+        need = ngx_escape_json(NULL, name->data, name->len);
+        if ((size_t) (last - p) >= name->len + need) {
             p = (u_char *) ngx_escape_json(p, name->data, name->len);
         }
         p = ngx_snprintf(p, last - p,
