@@ -19,7 +19,37 @@
 #define _HEAVYBAG_STATUS_H_INCLUDED_
 
 
+#ifndef HEAVYBAG_STAT_CC_UNIT_TEST
+
 #include "ngx_http_heavybag.h"
+
+#else
+
+/*
+ * Standalone unit-test shim (-DHEAVYBAG_STAT_CC_UNIT_TEST): substitute nginx
+ * for the pure per-country cc-table core (ngx_http_heavybag_stat_cc_bump), with
+ * NO nginx/SSL headers. The typedefs mirror nginx byte-for-byte; ngx_atomic_t
+ * is 64-bit so the cmp_set / fetch_add hit the same width as production. The
+ * runtime-symbol shim (the atomic ops) lives in heavybag_status.c under the
+ * same guard. The enum bounds below only size the OTHER counter arrays in the
+ * shm struct -- the cc core touches only cc[] + cc_overflow -- so any positive
+ * value compiles; the real -Werror SSL module build stays the contract.
+ */
+#include <stddef.h>
+#include <stdint.h>
+#include <time.h>
+typedef unsigned char  u_char;
+typedef intptr_t       ngx_int_t;
+typedef uintptr_t      ngx_uint_t;
+typedef uint64_t       ngx_atomic_t;
+typedef uint64_t       ngx_atomic_uint_t;
+
+#define HEAVYBAG_REASON_MAX  17
+#define HEAVYBAG_ACTION_MAX  3
+#define HEAVYBAG_UA_MAX      16
+#define HEAVYBAG_CAT_MAX     8
+
+#endif
 
 
 /* Per-country open-addressed table: a closed set (ISO-3166 + libloc A1/A2/A3/
@@ -129,6 +159,8 @@ typedef struct {
         ((u_char *) (sh) + sizeof(ngx_http_heavybag_stat_shm_t)))[idx])
 
 
+#ifndef HEAVYBAG_STAT_CC_UNIT_TEST
+
 /*
  * Per-{main,server} configuration for the HTTP head. The zone is added in
  * postconfiguration once nvhosts is known (it sizes the zone). stat_index is
@@ -155,6 +187,8 @@ ngx_int_t ngx_http_heavybag_status_handler(ngx_http_request_t *r);
  */
 extern ngx_str_t  heavybag_type_str[HEAVYBAG_UA_MAX];
 extern ngx_str_t  heavybag_reason_str[HEAVYBAG_REASON_MAX];
+
+#endif /* HEAVYBAG_STAT_CC_UNIT_TEST */
 
 
 #endif /* _HEAVYBAG_STATUS_H_INCLUDED_ */
