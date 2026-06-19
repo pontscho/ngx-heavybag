@@ -334,6 +334,29 @@ sleep 1
 a=$(getcnt stream_denied_rate_limit)
 [ $((a - b)) -ge 1 ] && ok "stream rate limit denies over-budget connections (+$((a-b)))" || bad "stream rate: want >=1 got +$((a-b))"
 
+# L4 detect double-would_block (documented-as-intended): ONE connection that
+# trips BOTH reputation AND rate in detect lands in TWO DISTINCT would_block
+# reason slots -- blocklist + rate_limit -- each bumped ONCE, NOT the same slot
+# twice (heavybag_stream.c:249-285: a detect rep would-block records its reason
+# then DECLINEs, so the rate path still runs and records rate_limit). vhost
+# 29094 = detect + blocklist 127.0.0.1/32 + rate burst=1. Drain the shared
+# per-IP bucket first (one burst=1 connection zeroes it) so the MEASURED
+# connection is over-limit; then assert the single connection bumps blocklist
+# AND rate_limit by exactly 1 each, and is allowed through (detect, denied=0).
+for i in 1 2 3 4; do curl -s --max-time 2 -o /dev/null "http://127.0.0.1:29094/" 2>/dev/null; done
+sleep 1
+b_blk=$(getcnt stream_would_block_blocklist)
+b_rate=$(getcnt stream_would_block_rate_limit)
+b_allow=$(getcnt stream_allowed)
+curl -s --max-time 2 -o /dev/null "http://127.0.0.1:29094/" 2>/dev/null    # the ONE measured connection
+sleep 1
+a_blk=$(getcnt stream_would_block_blocklist)
+a_rate=$(getcnt stream_would_block_rate_limit)
+a_allow=$(getcnt stream_allowed)
+assert_delta stream_would_block_blocklist  "$b_blk"   "$a_blk"   1
+assert_delta stream_would_block_rate_limit "$b_rate"  "$a_rate"  1
+assert_delta stream_allowed                "$b_allow" "$a_allow" 1
+
 echo "== asn/method reasons + would_block exposed in all 3 formats =="
 # new reasons render automatically in the WAF_REASON_MAX-driven blocked loops
 curl -s "$STAT/plain" | grep -q '^http_blocked_asn '          && ok "plain: http_blocked_asn"          || bad "plain missing http_blocked_asn"
