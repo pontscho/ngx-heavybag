@@ -72,11 +72,23 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
             /*
              * ngx_mail always sets Client-IP from the real peer, so a missing
              * or unparseable value means a malformed or external request.
-             * Fail open (allow) rather than break mail delivery, but log it.
+             * waf_mail_failopen on (default): fail OPEN (allow) rather than
+             * break mail delivery, but log it. off: fail CLOSED (deny) for an
+             * operator who would rather drop an unattributable auth than risk
+             * letting it through unjudged.
              */
+            if (wlcf->mail_failopen) {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "heavybag: mail auth without parseable Client-IP, "
+                              "allowing (waf_mail_failopen on)");
+                return ngx_http_heavybag_authhttp_allow(r, wlcf);
+            }
+
             ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
-                          "heavybag: mail auth without parseable Client-IP, allowing");
-            return ngx_http_heavybag_authhttp_allow(r, wlcf);
+                          "heavybag: mail auth without parseable Client-IP, "
+                          "denying (waf_mail_failopen off)");
+            ngx_str_set(&reason, "mail client-ip missing");
+            return ngx_http_heavybag_authhttp_deny(r, &reason);
         }
 
         sa = addr.sockaddr;
