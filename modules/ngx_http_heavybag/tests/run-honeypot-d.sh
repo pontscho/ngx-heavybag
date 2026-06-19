@@ -27,7 +27,7 @@
 
 set -u
 
-ROOT=/path/to/ngx-heavybag
+ROOT=${HEAVYBAG_ROOT:-/path/to/ngx-heavybag}
 CORPUS=$ROOT/modules/ngx_http_heavybag/tests/corpus
 TOOLS=$ROOT/modules/ngx_http_heavybag/tools
 SRC=$ROOT/reference/geolookup.c
