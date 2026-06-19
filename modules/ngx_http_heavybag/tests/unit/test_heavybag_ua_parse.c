@@ -405,6 +405,73 @@ CTEST(spoof, unmapped_ua_is_not_spoof)
     ASSERT_FALSE(ja4_signal(HEAVYBAG_TLSFAM_CHROMIUM, HEAVYBAG_BROWSER_MSIE));
 }
 
+/* ===================================================================== *
+ *  watchOS OS detection (L5 fix)                                        *
+ *                                                                       *
+ *  The bare "Watch" substring used to false-positive on "Smartwatch" /  *
+ *  ".../watch?v="; and because it sat AFTER the Mac-OS-X block, a real   *
+ *  Apple Watch UA (which carries "like Mac OS X") was stolen as iPhone   *
+ *  and the watchOS verdict only ever fired on the false-positives. The   *
+ *  fix anchors to "Apple Watch"/"watchOS" and moves the check BEFORE the *
+ *  Mac-OS-X block.                                                      *
+ * ===================================================================== */
+
+/* AppleCoreMedia on watchOS: carries "Apple Watch" AND "like Mac OS X".
+ * Pre-fix this resolved to iPhone; now it resolves to watchOS. */
+CTEST(ua_os, real_apple_watch_is_watchos)
+{
+    ASSERT_EQUAL(HEAVYBAG_OS_WATCHOS,
+        P("AppleCoreMedia/1.0.0.18R402 (Apple Watch; U; CPU OS 7_0_2 "
+          "like Mac OS X; it_it)").o);
+}
+
+/* WebKit on watchOS: carries "Apple Watch" + "WatchOS" + "like Mac OS X". */
+CTEST(ua_os, webkit_watchos_is_watchos)
+{
+    ASSERT_EQUAL(HEAVYBAG_OS_WATCHOS,
+        P("Mozilla/5.0 (Apple Watch; CPU WatchOS 8_7 like Mac OS X) "
+          "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/16R591").o);
+}
+
+/* "Smartwatch" contains "watch" but neither anchor -> NOT watchOS. */
+CTEST(ua_os, smartwatch_is_not_watchos)
+{
+    pr_t r = P("Mozilla/5.0 (Linux; Android 10; Smartwatch 3) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 "
+               "Mobile Safari/537.36");
+    ASSERT_NOT_EQUAL(HEAVYBAG_OS_WATCHOS, r.o);
+    ASSERT_EQUAL(HEAVYBAG_OS_ANDROID, r.o);
+}
+
+/* A ".../watch?v=" URL token in the UA must NOT be read as watchOS. */
+CTEST(ua_os, watch_url_is_not_watchos)
+{
+    pr_t r = P("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 "
+               "+https://youtube.com/watch?v=dQw4w9WgXcQ");
+    ASSERT_NOT_EQUAL(HEAVYBAG_OS_WATCHOS, r.o);
+    ASSERT_EQUAL(HEAVYBAG_OS_WINDOWS, r.o);
+}
+
+/* The watch prepend must NOT divert the Apple iOS/macOS cascade: none of
+ * these carry the anchors, so their pre-existing verdicts are unchanged.
+ * (Modern iPad UAs carry "like Mac OS X" and already collapse to the iOS
+ * verdict at the "like Mac OS X" probe -- a pre-existing behaviour, asserted
+ * here only to prove the reorder did not send them to watchOS.) */
+CTEST(ua_os, apple_ios_macos_cascade_unregressed)
+{
+    ASSERT_EQUAL(HEAVYBAG_OS_IPHONE,
+        P("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+          "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+          "Mobile/15E148 Safari/604.1").o);
+    ASSERT_EQUAL(HEAVYBAG_OS_IPHONE,
+        P("Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+          "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1").o);
+    ASSERT_EQUAL(HEAVYBAG_OS_MACOS,
+        P("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+          "(KHTML, like Gecko) Version/17.4 Safari/605.1.15").o);
+}
+
 
 /* ===================================================================== *
  *  EDGE / FUZZ vectors (WF-3 ua-fuzz backlog, Test-matrix Phase 3)      *

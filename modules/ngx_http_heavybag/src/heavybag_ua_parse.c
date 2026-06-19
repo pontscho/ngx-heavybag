@@ -219,6 +219,19 @@ heavybag_ua_try_os(const u_char *ua, size_t n)
         return HEAVYBAG_OS_WINDOWS;
     }
 
+    /*
+     * Apple Watch UAs (AppleCoreMedia / WebKit on watchOS, e.g.
+     * "AppleCoreMedia/... (Apple Watch; U; CPU OS 7_0_2 like Mac OS X; ...)")
+     * carry "like Mac OS X", so they MUST be caught BEFORE the Mac-OS-X / iOS
+     * block below -- otherwise the "like Mac OS X" probe steals them as iPhone
+     * and a genuine watch never reaches the watchOS verdict. Anchored to
+     * "Apple Watch" / "watchOS": the previous bare "Watch" substring was an
+     * unanchored false-positive (it matched "Smartwatch" and ".../watch?v=").
+     */
+    if (HEAVYBAG_HAS(ua, n, "Apple Watch") || HEAVYBAG_HAS(ua, n, "watchOS")) {
+        return HEAVYBAG_OS_WATCHOS;
+    }
+
     if (HEAVYBAG_HAS(ua, n, "Mac OS X") || HEAVYBAG_HAS(ua, n, "Darwin")
         || HEAVYBAG_HAS(ua, n, "-iOS/"))
     {
@@ -230,8 +243,6 @@ heavybag_ua_try_os(const u_char *ua, size_t n)
         if (HEAVYBAG_HAS(ua, n, "iPod"))      { return HEAVYBAG_OS_IPOD; }
         return HEAVYBAG_OS_MACOS;
     }
-
-    if (HEAVYBAG_HAS(ua, n, "Watch")) { return HEAVYBAG_OS_WATCHOS; }
 
     if (HEAVYBAG_HAS(ua, n, "Linux")) {
         if (HEAVYBAG_HAS(ua, n, "Windows Phone")) { return HEAVYBAG_OS_WPHONE; }
