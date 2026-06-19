@@ -1,0 +1,13 @@
+# Controlled Cookie signature list for the Phase 6 protocol/decode harness
+# (tests/run-protocol-tests.sh). NOT a production list. Drives the cookie half
+# of module.c: ngx_http_heavybag_sig_cookie_lookup (module.c:887) walks EVERY
+# "Cookie" request header (the generic ngx_list walk, not the version-coupled
+# headers_in.cookie slot) and matches each value AS A WHOLE against the row --
+# there is NO ;/= pair-walk, the entire header value is the subject.
+#
+#   sqlmap        -> 404   (bare substring: matches anywhere in the whole value)
+#   ^evilcookie$  -> 403   (anchored: matches ONLY if the WHOLE value is exactly
+#                          "evilcookie" -- proves no pair-walk, since "a=evilcookie"
+#                          as a whole value cannot satisfy ^...$)
+sqlmap         404
+^evilcookie$   403

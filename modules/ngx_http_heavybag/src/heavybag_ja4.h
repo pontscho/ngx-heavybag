@@ -60,8 +60,10 @@ int ngx_http_heavybag_ja4_build(const uint16_t *ciphers, size_t n_ciphers,
 
 #ifndef HEAVYBAG_JA4_UNIT_TEST
 
+#ifndef HEAVYBAG_JA4_EXTRACT_UNIT_TEST   /* extractor unit-mock provides the nginx-type shim itself */
 #include <ngx_config.h>
 #include <ngx_core.h>
+#endif
 
 struct ssl_st;
 
