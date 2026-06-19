@@ -71,6 +71,13 @@ endfunction()
 # --- standalone unit suite (compiles its own gcc binaries, no nginx) ---------
 heavybag_add_test(heavybag_unit         unit/run-unit-tests.sh  LABELS "unit"                TIMEOUT 600)
 
+# --- same suite under gcov instrumentation (opt-in measurement, additive) ----
+# Mirrors heavybag_unit but flips HEAVYBAG_COVERAGE=1 so each TU is built
+# --coverage -O0 and a per-source line/branch report is printed. heavybag_unit
+# stays THE fast gate; this one is for measuring, not gating (-O0 + gcov is
+# slower, hence the wider timeout). Run it explicitly: ctest -L coverage.
+heavybag_add_test(heavybag_unit_coverage unit/run-unit-tests.sh LABELS "unit;coverage" TIMEOUT 900 ENV "HEAVYBAG_COVERAGE=1")
+
 # --- build-portability matrix (rebuilds the ./configure permutation trees) ---
 heavybag_add_test(heavybag_build_matrix run-build-matrix.sh     LABELS "build"               TIMEOUT 1800)
 

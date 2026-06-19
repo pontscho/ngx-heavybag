@@ -15,8 +15,74 @@
 #define _HEAVYBAG_REP_H_INCLUDED_
 
 
+#ifndef HEAVYBAG_REPUTATION_UNIT_TEST
+
 #include <ngx_config.h>
 #include <ngx_core.h>
+
+#else
+
+/*
+ * Standalone unit-test shim (-DHEAVYBAG_REPUTATION_UNIT_TEST): substitute
+ * nginx for the pure verdict-precedence core of
+ * ngx_http_heavybag_reputation_check -- NO nginx / SSL headers. Same discipline
+ * as the geo shim: it REPLACES nginx byte-compatibly, it never redefines its
+ * semantics; the -Werror SSL module build stays the only correctness
+ * contract. The config-time *_add() helpers in heavybag_reputation.c (which
+ * need ngx_conf_t / ngx_array_create / ngx_ptocidr) are gated out of this TU
+ * under the same guard, exactly as heavybag_geo.c gates its open()/verify path.
+ *
+ * The scalar/str types + the geo db/result structs come from the geo shim
+ * (heavybag_geo.h under HEAVYBAG_GEO_UNIT_TEST), pulled in here so this header
+ * and geo.h agree on ngx_str_t byte-for-byte; geo.h's include guard then stops
+ * a second, conflicting definition when heavybag_reputation.c re-includes it.
+ */
+#include <sys/socket.h>
+#ifndef HEAVYBAG_GEO_UNIT_TEST
+#define HEAVYBAG_GEO_UNIT_TEST
+#endif
+#include "heavybag_geo.h"   /* u_char/ngx_int_t/ngx_uint_t/ngx_str_t + geo structs */
+
+#define NGX_OK              0
+#define NGX_ERROR          -1
+#define NGX_DECLINED       -5
+#define NGX_HTTP_FORBIDDEN  403
+#define NGX_HTTP_NOT_FOUND  404
+
+/* nginx's two-statement macro, verbatim (callers use it as a full statement) */
+#define ngx_str_set(str, text)                                                \
+    (str)->len = sizeof(text) - 1; (str)->data = (u_char *) text
+
+/*
+ * Mirrors nginx's struct ngx_array_s FIELD ORDER (elts, nelts, size, nalloc,
+ * pool) so reputation_check's ->elts / ->nelts reads land at the right
+ * offsets. The test fills elts/nelts; size/nalloc/pool are unused here.
+ */
+typedef struct {
+    void        *elts;
+    ngx_uint_t   nelts;
+    size_t       size;
+    ngx_uint_t   nalloc;
+    void        *pool;
+} ngx_array_t;
+
+/* opaque CIDR vector; the test's ngx_cidr_match decides match vs miss */
+typedef struct ngx_cidr_s ngx_cidr_t;
+
+/*
+ * Opaque ngx_conf_t: lets the shared config-helper prototypes below
+ * (cidr_add/country_add/asn_add/flag_add/geo_open) parse. Their bodies are
+ * gated out of this TU, and the test never calls them, so an incomplete type
+ * is enough.
+ */
+typedef struct ngx_conf_s ngx_conf_t;
+
+/* both provided by the test TU -- reputation_check's only external calls */
+extern ngx_int_t ngx_cidr_match(struct sockaddr *sa, ngx_array_t *cidr);
+extern void ngx_http_heavybag_geo_lookup(ngx_http_heavybag_geo_db_t *db,
+    struct sockaddr *sa, ngx_http_heavybag_geo_result_t *res);
+
+#endif
 
 
 /* full type lives in heavybag_geo.h; only the pointer is stored here */
