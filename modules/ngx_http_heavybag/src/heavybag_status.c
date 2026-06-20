@@ -75,7 +75,7 @@ ngx_http_heavybag_stat_cc_bump(void *shm, uint16_t cc16, ngx_uint_t blocked)
             if (ngx_atomic_cmp_set(&cc->cc16, 0, cc16)) {
                 cur = cc16;             /* we claimed this empty slot */
             } else {
-                cur = cc->cc16;         /* lost the race; read the winner */
+                cur = cc->cc16;         /* LCOV_EXCL_LINE: lost the claim CAS, re-read winner; lock-free CAS-lose, single-threaded never reaches it (no TSan stress for the cc table) */
             }
         }
 

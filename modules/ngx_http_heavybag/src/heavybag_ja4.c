@@ -131,7 +131,7 @@ ja4_append_hex_csv(char *buf, size_t cap, size_t *pos,
 
     for (i = 0; i < n; i++) {
         if (*pos + 1 >= cap) {
-            break;
+            break;  /* LCOV_EXCL_LINE: static csv[HEAVYBAG_JA4_MAX_ELEMS*5*2+4]=2564B vs max 256*5=1280 chars -> defensive truncation guard, never triggers */
         }
         w = snprintf(buf + *pos, cap - *pos, "%s%04x",
                      (i == 0) ? "" : ",", vals[i]);
@@ -154,7 +154,7 @@ ja4_sha256_hex12(const char *in, size_t len, char out[13])
     if (EVP_Digest(in, len, md, &mdlen, EVP_sha256(), NULL) != 1
         || mdlen < 6)
     {
-        return -1;
+        return -1;  /* LCOV_EXCL_LINE: EVP_Digest never fails on a valid in-process SHA-256 (no shim injection); fail-closed at every call site */
     }
 
     for (i = 0; i < 6; i++) {
@@ -237,7 +237,7 @@ ngx_http_heavybag_ja4_build(const uint16_t *ciphers, size_t n_ciphers,
         csv[0] = '\0';
         ja4_append_hex_csv(csv, sizeof(csv), &pos, list, n);
         if (ja4_sha256_hex12(csv, pos, jb) != 0) {
-            return -1;
+            return -1;  /* LCOV_EXCL_LINE: ja4_sha256_hex12 cannot fail (see :157); JA4_b path fail-closed (rc=NGX_ERROR, empty out upstream) */
         }
     }
 
@@ -278,7 +278,7 @@ ngx_http_heavybag_ja4_build(const uint16_t *ciphers, size_t n_ciphers,
             ja4_append_hex_csv(csv, sizeof(csv), &pos, sig, ns);
         }
         if (ja4_sha256_hex12(csv, pos, jc) != 0) {
-            return -1;
+            return -1;  /* LCOV_EXCL_LINE: ja4_sha256_hex12 cannot fail (see :157); JA4_c path fail-closed (rc=NGX_ERROR, empty out upstream) */
         }
     }
 
@@ -421,7 +421,7 @@ ngx_http_heavybag_ja4_compute(SSL *ssl, ngx_pool_t *pool, ngx_str_t *out)
     if (ngx_http_heavybag_ja4_build(ciphers, n_cip, exts, n_ext, sigalgs, n_sig,
                                alpn, alpn_len, version, is_quic, buf) != 0)
     {
-        goto cleanup;
+        goto cleanup;  /* LCOV_EXCL_LINE: ja4_build only returns !=0 on NULL-out (buf is stack) or digest fail (see :157) -> unreachable; fail-closed */
     }
 
     n = ngx_strlen(buf);

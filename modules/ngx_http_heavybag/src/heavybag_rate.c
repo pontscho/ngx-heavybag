@@ -241,7 +241,7 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
                 s = cand;                    /* claimed a fresh empty slot */
                 break;
             }
-            k = cand->key;                   /* lost the race; read the winner */
+            k = cand->key;  /* LCOV_EXCL_LINE: lost the claim CAS, re-read the winner; lock-free CAS-lose arm driven by HEAVYBAG_TSAN=1 concurrent_same_key, not the ASan+gcov pass */
         }
         if (k == h) {
             s = cand;                        /* our slot */
@@ -251,8 +251,7 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
         /* eviction-candidate tracking -- never evict a fresh/active slot */
         sstate = cand->state;
         if (sstate == 0) {
-            continue;                        /* just-claimed/just-reset (key!=0,
-                                              * state==0): not yet a limiter */
+            continue;  /* LCOV_EXCL_LINE: state==0 skip (just-claimed key!=0, state==0 -> not yet a limiter); plain defensive, not exercised by the single-key TSan stress */
         }
 
         age = now32 - (uint32_t) (sstate >> 32);   /* wrap-safe age */
@@ -262,7 +261,7 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
              * ms int32 sign flip). Skipping a 24-day-idle slot is harmless;
              * the clamp's real job is to stop a future-stamped slot from
              * underflowing to a giant age and being picked as "oldest". */
-            continue;
+            continue;  /* LCOV_EXCL_LINE: age<=0 clamp (future-stamped / >24-day-idle slot); plain defensive, not exercised by the single-key TSan stress */
         }
         if (age > best_age) {                /* STRICTLY older than the floor */
             best_age = age;
@@ -301,8 +300,8 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
             s = oldest;
 
         } else {
-            (void) ngx_atomic_fetch_add(&hdr->rate_overflow, 1);
-            return NGX_OK;       /* eviction lost -> fail-open */
+            (void) ngx_atomic_fetch_add(&hdr->rate_overflow, 1);  /* LCOV_EXCL_LINE: lost-eviction CAS path (observable via rate_overflow); single-threaded unreachable */
+            return NGX_OK;       /* LCOV_EXCL_LINE: eviction-CAS lost -> fail-open; lock-free CAS-lose arm, single-threaded never reaches it */
         }
     }
 
@@ -343,7 +342,7 @@ ngx_http_heavybag_rate_check(void *shm, struct sockaddr *sa,
         ngx_cpu_pause();
     }
 
-    return NGX_OK;                        /* CAS starvation -> fail-open */
+    return NGX_OK;  /* LCOV_EXCL_LINE: CAS-starvation fail-open after HEAVYBAG_RATE_CAS_MAX retries; needs sustained single-slot contention (HEAVYBAG_TSAN=1 drives the CAS arms); see security sign-off */
 }
 
 

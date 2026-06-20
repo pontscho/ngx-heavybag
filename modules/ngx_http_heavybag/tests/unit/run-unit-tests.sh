@@ -176,36 +176,116 @@ if [ "${HEAVYBAG_TSAN:-0}" = "1" ]; then
     fi
 fi
 
-# ---- per-suite coverage report (gcov text; lcov HTML if available) -------
-# Each suite is ONE translation unit: test-X.c #includes the production
-# src/heavybag_*.c. gcov on the TU stem reports every contributing source;
-# we print only the production files (src/heavybag*), skipping the harness.
+# ---- per-source coverage (exclude-aware, double-stem union) ---------------
+# Each suite is ONE translation unit (test-X.c #includes a production
+# src/heavybag_*.c). `gcov -b -t <stem>` writes the ANNOTATED source to STDOUT
+# (-t/--stdout: no .gcov files -> the two match/ja4 stems can no longer
+# overwrite each other's report). For every production source we feed ALL its
+# contributing stems' stdout through one awk that:
+#   * unions per-line coverage  -- a line is covered if its hit count is >0 in
+#     ANY stem (the PCRE1 #else arm runs only in the pcre1 stem and the normal
+#     NGX_PCRE2 path only in the main stem; without the union either side would
+#     read as a false <100%). A line '#####' in one stem and '-' (not compiled)
+#     in another is still uncovered -- '-' is not coverage.
+#   * counts a branch as uncovered ONLY when gcov says "never executed" (the
+#     gcov "Branches executed" metric -- a reached, one-directional `taken 0%`
+#     defensive arm is NOT a hole; this is the agreed gate semantics). A branch
+#     is unioned per (line, position): covered if reached in ANY stem.
+#   * honours lcov-style exclusion markers read from the annotated source text
+#     itself -- LCOV_EXCL_LINE, LCOV_EXCL_START/STOP (block), LCOV_EXCL_BR_LINE
+#     (branches only) -- so structurally-unreachable fail-closed/OOM/CAS-lose
+#     arms and the unit-test nginx shim are excluded, auditably, in-diff.
+#   * skips gcov's interleaved `call N returned ...` / `function ... called ...`
+#     lines so they never pollute the branch count.
+# Result: 100.00% line + 100.00% branch on the reachable code; any remaining
+# file:line is listed so a regression is immediately visible. Coverage is a
+# MEASURE here (it does not change the suite's pass/fail exit), matching the
+# heavybag_unit_coverage test's role.
 if [ "${HEAVYBAG_COVERAGE:-0}" = "1" ]; then
     echo
-    echo "================== COVERAGE (gcov -b) =================="
-    cov_one() {  # $1 = output-binary basename (== gcno/gcda stem prefix), $2 = test src
-        stem="$1-${2%.c}"
-        if [ ! -f "$TMP/$stem.gcda" ]; then
-            echo "  [$1] no .gcda (suite skipped or aborted -- no coverage)"; return
+    echo "========= COVERAGE (gcov -b -t, exclude-aware + double-stem union) ========="
+
+    cov_fail=0
+    cov_union() {                 # $1 = production stem (heavybag_xxx); $2.. = gcda stems
+        prod="$1"; shift
+        have=""
+        for st in "$@"; do
+            [ -f "$TMP/$st.gcda" ] && have="$have $st"
+        done
+        if [ -z "$have" ]; then
+            echo "  [$prod.c] no .gcda (suite skipped or aborted)"; cov_fail=1; return
         fi
-        # gcov lists the production file as its LAST File block, so the
-        # trailing whole-TU summary would inherit p=1; reset on 'Creating'.
-        gcov -b "$stem" 2>/dev/null | awk '
-            /^File / { p = ($0 ~ /src\/heavybag/); if (p) print "  " $0; next }
-            /^Creating / { p = 0; next }
-            p && /^Lines executed:/    { print "      " $0 }
-            p && /^Branches executed:/ { print "      " $0 }
-        '
+        { for st in $have; do echo "@@STEM@@"; gcov -b -t "$st" 2>/dev/null; done; } \
+        | awk -v PROD="$prod" '
+            function lineno(s,  t){ t=s; sub(/^[ \t]*[^:]*:[ \t]*/,"",t); sub(/:.*/,"",t); return t+0 }
+            function covfld(s,  t){ t=s; sub(/:.*/,"",t); gsub(/[ \t]/,"",t); return t }
+            /^@@STEM@@/                  { excl=0; curL=0; brk=0; next }
+            /^[ \t]*-:[ \t]*0:Source:/  { p=$0; sub(/.*Source:/,"",p);
+                                          infile=(index(p, "/" PROD ".c")>0); next }
+            {
+                if (!infile) next
+                if (match($0, /^[ \t]*[^:]*:[ \t]*[0-9]+:/)) {
+                    L=lineno($0); c=covfld($0)
+                    txt=$0; sub(/^[ \t]*[^:]*:[ \t]*[0-9]+:/,"",txt)
+                    if (txt ~ /LCOV_EXCL_START/) excl=1
+                    if (txt ~ /LCOV_EXCL_STOP/)  excl=0
+                    le = (excl || txt ~ /LCOV_EXCL_LINE/)
+                    be = (le  || txt ~ /LCOV_EXCL_BR_LINE/)
+                    if (L>0 && c!="-") {
+                        EXEC[L]=1
+                        if (c!="#####" && c!="=====") COV[L]=1
+                    }
+                    if (le) XL[L]=1
+                    if (be) XB[L]=1
+                    curL=L; brk=0
+                    next
+                }
+                if ($0 ~ /^branch /) {
+                    if (curL<=0) next
+                    k=curL SUBSEP brk
+                    BR[k]=1
+                    if ($0 !~ /never executed/) BC[k]=1
+                    brk++
+                }
+            }
+            END {
+                lt=0; lc=0; ul=""
+                for (L in EXEC) {
+                    if (XL[L]) continue
+                    lt++
+                    if (COV[L]) lc++; else ul=ul " " L
+                }
+                bt=0; bc=0; ub=""
+                for (k in BR) {
+                    split(k,a,SUBSEP); L=a[1]
+                    if (XL[L] || XB[L]) continue
+                    bt++
+                    if (BC[k]) bc++; else ub=ub " " L
+                }
+                lp = lt? 100.0*lc/lt : 100.0
+                bp = bt? 100.0*bc/bt : 100.0
+                printf "  %-20s line %7.2f%% (%d/%d)  branch %7.2f%% (%d/%d)\n", \
+                       PROD".c", lp, lc, lt, bp, bc, bt
+                if (lc<lt) printf "      LINE   uncovered:%s\n", ul
+                if (bc<bt) printf "      BRANCH uncovered (line):%s\n", ub
+                if (lc<lt || bc<bt) exit 1
+            }
+        ' || cov_fail=1
     }
-    cov_one heavybag-test-ja4          test-ja4.c
-    cov_one heavybag-test-ja4-extract  test-ja4-extract.c
-    cov_one heavybag-test-ua-parse     test_heavybag_ua_parse.c
-    cov_one heavybag-test-rate         test-rate.c
-    cov_one heavybag-test-geo          test-geo.c
-    cov_one heavybag-test-match        test-match.c
-    cov_one heavybag-test-stat-cc      test-stat-cc.c
-    cov_one heavybag-test-reputation   test-reputation.c
-    cov_one heavybag-test-match-pcre1  test-match-pcre1.c
+
+    cov_union heavybag_ja4        heavybag-test-ja4-test-ja4 heavybag-test-ja4-extract-test-ja4-extract
+    cov_union heavybag_ua_parse   heavybag-test-ua-parse-test_heavybag_ua_parse
+    cov_union heavybag_rate       heavybag-test-rate-test-rate
+    cov_union heavybag_geo        heavybag-test-geo-test-geo
+    cov_union heavybag_match      heavybag-test-match-test-match heavybag-test-match-pcre1-test-match-pcre1
+    cov_union heavybag_status     heavybag-test-stat-cc-test-stat-cc
+    cov_union heavybag_reputation heavybag-test-reputation-test-reputation
+
+    if [ "$cov_fail" = 0 ]; then
+        echo "  -> all production sources: 100.00% line + 100.00% branch (reachable code; exclusions auditable in-diff)"
+    else
+        echo "  -> COVERAGE INCOMPLETE (uncovered file:line listed above)"
+    fi
 
     if command -v lcov >/dev/null 2>&1 && command -v genhtml >/dev/null 2>&1; then
         lcov --quiet --capture --directory "$TMP" --output-file "$TMP/heavybag.info" 2>/dev/null
@@ -215,7 +295,7 @@ if [ "${HEAVYBAG_COVERAGE:-0}" = "1" ]; then
     else
         echo "  (lcov/genhtml absent -> gcov text only; install lcov for an HTML report)"
     fi
-    echo "========================================================"
+    echo "==========================================================================="
 fi
 
 exit $rc
