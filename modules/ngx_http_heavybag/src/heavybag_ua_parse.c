@@ -431,7 +431,7 @@ heavybag_ua_try_device(const u_char *ua, size_t n, ngx_http_heavybag_ua_os_e os,
     }
 
     if (HEAVYBAG_HAS(ua, n, "Nintendo DSi;") || HEAVYBAG_HAS(ua, n, "Nintendo Wii;")) {
-        return HEAVYBAG_CAT_CONSOLE;
+        return HEAVYBAG_CAT_CONSOLE;  /* LCOV_EXCL_LINE: unreachable -- "Nintendo DSi;"/"Nintendo Wii;" are caught by try_os (:264-265) -> NINTENDO* enum -> CONSOLE switch (:400) precedes this substring fallback */
     }
 
     return HEAVYBAG_CAT_UNKNOWN;

@@ -111,6 +111,7 @@ heavybag_ut_log_capture(ngx_uint_t level)
 }
 #define ngx_conf_log_error(level, cf, err, ...)  heavybag_ut_log_capture(level)
 
+/* LCOV_EXCL_START : unit-test nginx shim (ngx_array_* / ngx_regex_* reimpl) -- test scaffolding, NOT WAF code; its malloc/realloc/match-data OOM arms are unreachable in the short-lived single-threaded test process */
 /* minimal ngx_array_t (malloc-backed, doubling growth) */
 static ngx_array_t *
 ngx_array_create(ngx_pool_t *pool, ngx_uint_t n, size_t size)
@@ -185,6 +186,7 @@ ngx_regex_exec(ngx_regex_t *re, ngx_str_t *s, void *captures, ngx_uint_t size)
     pcre2_match_data_free(md);
     return rc;
 }
+/* LCOV_EXCL_STOP */
 
 #endif
 
@@ -301,8 +303,7 @@ ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
         heavybag_mctx = pcre2_match_context_create(NULL);
         if (heavybag_mctx == NULL) {
             /* OOM -> wrapper (no limit, but still classified tri-state) */
-            return ngx_http_heavybag_re_classify(
-                       (int) ngx_regex_exec(re, s, NULL, 0));
+            return ngx_http_heavybag_re_classify((int) ngx_regex_exec(re, s, NULL, 0));  /* LCOV_EXCL_LINE: pcre2_match_context_create OOM fallback; never fails in-process */
         }
         pcre2_set_match_limit(heavybag_mctx, HEAVYBAG_PCRE2_MATCH_LIMIT);
         pcre2_set_depth_limit(heavybag_mctx, HEAVYBAG_PCRE2_DEPTH_LIMIT);
@@ -310,8 +311,7 @@ ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
     if (heavybag_mdata == NULL) {
         heavybag_mdata = pcre2_match_data_create(1, NULL);   /* boolean match */
         if (heavybag_mdata == NULL) {
-            return ngx_http_heavybag_re_classify(
-                       (int) ngx_regex_exec(re, s, NULL, 0));
+            return ngx_http_heavybag_re_classify((int) ngx_regex_exec(re, s, NULL, 0));  /* LCOV_EXCL_LINE: pcre2_match_data_create OOM fallback; never fails in-process */
         }
     }
 
@@ -499,7 +499,7 @@ ngx_http_heavybag_compile_bucket(ngx_conf_t *cf, ngx_array_t *patterns,
 
     combined.data = ngx_palloc(cf->temp_pool, len);
     if (combined.data == NULL) {
-        return NGX_ERROR;
+        return NGX_ERROR;  /* LCOV_EXCL_LINE: ngx_palloc OOM for the combined alternation -> fail-closed; unreachable in the short-lived test process */
     }
 
     p = combined.data;
@@ -547,7 +547,7 @@ ngx_http_heavybag_scanner_compile(ngx_conf_t *cf, ngx_str_t *path,
     for (i = 0; i < HEAVYBAG_ACTION_MAX; i++) {
         buckets[i] = ngx_array_create(cf->temp_pool, 32, sizeof(ngx_str_t));
         if (buckets[i] == NULL) {
-            return NGX_ERROR;
+            return NGX_ERROR;  /* LCOV_EXCL_LINE: ngx_array_create OOM -> fail-closed; unreachable in the short-lived test process */
         }
     }
 
@@ -612,7 +612,7 @@ ngx_http_heavybag_scanner_compile(ngx_conf_t *cf, ngx_str_t *path,
 
         pat = ngx_array_push(buckets[bucket]);
         if (pat == NULL) {
-            return NGX_ERROR;
+            return NGX_ERROR;  /* LCOV_EXCL_LINE: ngx_array_push OOM (realloc fail) -> fail-closed; unreachable in the short-lived test process */
         }
 
         pat->data = ps;
