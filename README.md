@@ -1023,6 +1023,68 @@ To pick known-country test IPs, build the geo oracle and query the DB:
 (prints `CC=`, `flags=` — note `flags=0x0004` is `anycast`, which the flag
 check denies *before* the country decision).
 
+### Unit tests & coverage
+
+Beyond the smoke tests, the module ships a C unit suite (the `ctest.h`
+framework — *not* CMake's CTest) over the reputation core, scanner/UA
+matching, the UA parser, JA4, the rate limiter, geo, and the status endpoint.
+
+```sh
+ctest --test-dir build                                       # 14 suites of record
+bash modules/ngx_http_heavybag/tests/unit/run-unit-tests.sh  # the raw unit runner
+```
+
+<details>
+<summary><b>Line + branch coverage (gcov, reachable-100%)</b></summary>
+
+Coverage is **opt-in** and self-contained — no `lcov` dependency, gcov text
+only (install `lcov` for an HTML report). Clear the stale counters first so the
+recorded line numbers match the current sources, then run with
+`HEAVYBAG_COVERAGE=1`:
+
+```sh
+rm -f /tmp/heavybag-test-*.gc*
+HEAVYBAG_COVERAGE=1 bash modules/ngx_http_heavybag/tests/unit/run-unit-tests.sh
+```
+
+The runner builds each suite with `--coverage`, then post-processes
+`gcov -b -t` (annotated source on **stdout**, so two suites compiling the
+*same* translation unit don't overwrite each other's `.gcov`). The filter is:
+
+- **exclude-aware** — it reads `LCOV_EXCL_LINE` / `LCOV_EXCL_START..STOP` /
+  `LCOV_EXCL_BR_LINE` markers straight from the source text and drops those
+  lines/branches from the denominator;
+- **double-stem union** — a line is *covered* if it executed in **any** suite
+  (`heavybag_ja4.c` builds in both the core and the extractor suite,
+  `heavybag_match.c` in both the PCRE2 and the PCRE1 arm). A line that is
+  `#####` in one stem and `-` (not compiled) in the other is still uncovered —
+  a 3-state merge, not a naive `comm`;
+- **branch metric = "reached"** — gcov's *Branches executed* (a never-executed
+  branch is uncovered). A one-directional defensive branch that is reached but
+  only ever taken one way is **not** counted as a hole.
+
+**Philosophy — reachable 100%.** Every line a unit test *can* drive is covered;
+lines that are structurally unreachable from a unit test (allocation-OOM,
+`EVP_*` fail-closed paths, lost compare-and-swap races, the test shim itself)
+are marked `LCOV_EXCL_*`, so they leave the denominator and the exclusion is
+auditable in the diff. The report then reads a clean 100/100 on real code:
+
+```
+heavybag_ja4.c         line 100.00% (190/190)  branch 100.00% (167/167)
+heavybag_ua_parse.c    line 100.00% (254/254)  branch 100.00% (379/379)
+heavybag_rate.c        line 100.00% (101/101)  branch 100.00% (63/63)
+heavybag_geo.c         line 100.00% (47/47)    branch 100.00% (27/27)
+heavybag_match.c       line 100.00% (143/143)  branch 100.00% (124/124)
+heavybag_status.c      line 100.00% (17/17)    branch 100.00% (14/14)
+heavybag_reputation.c  line 100.00% (78/78)    branch 100.00% (68/68)
+```
+
+Coverage is for **measuring, not gating** — a suite's exit code is its
+pass/fail, not the percentage. The ThreadSanitizer stress pass over the
+lock-free rate limiter and status counters is a separate opt-in
+(`HEAVYBAG_TSAN=1`, ~4 s — kept out of the default gate).
+</details>
+
 ## Runtime behavior
 
 The HTTP head's per-request decision chain (cheap → expensive; the **first**
