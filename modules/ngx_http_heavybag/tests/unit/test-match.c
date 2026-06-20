@@ -377,6 +377,45 @@ CTEST(match, regex_exec_tristate_clean_paths)
 }
 
 
+/* ======================================================================= *
+ *  scanner_compile failure paths (read_file abort + invalid regex).        *
+ * ======================================================================= */
+
+/* read_file failure (a missing/unreadable list) aborts the compile fail-closed.
+ * The shim read_file returns NGX_ERROR when heavybag_ut_file.data == NULL, which
+ * scanner_compile propagates (covers the shim read_file NULL arm + the
+ * scanner_compile read_file-failed propagation). */
+CTEST(match, read_file_null_aborts_compile)
+{
+    ngx_regex_t  *re[HEAVYBAG_ACTION_MAX] = { 0 };
+    ngx_conf_t    cf;
+    ngx_str_t     path;
+
+    memset(&cf, 0, sizeof(cf));
+    path.data = (u_char *) "missing.list";
+    path.len = sizeof("missing.list") - 1;
+
+    heavybag_ut_file.data = NULL;          /* simulate a missing/unreadable file */
+    heavybag_ut_file.len = 0;
+
+    ASSERT_EQUAL(NGX_ERROR,
+                 ngx_http_heavybag_scanner_compile(&cf, &path, re));
+}
+
+/* an invalid PCRE2 pattern (an unmatched '(') makes ngx_regex_compile fail, so
+ * compile_bucket logs EMERG and propagates NGX_ERROR, which scanner_compile
+ * propagates (fail-closed: a broken list aborts the reload, never silently
+ * compiles an empty/partial rule set). */
+CTEST(match, invalid_regex_aborts_compile)
+{
+    ngx_regex_t  *re[HEAVYBAG_ACTION_MAX] = { 0 };
+
+    heavybag_ut_emerg_count = 0;
+    ASSERT_EQUAL(NGX_ERROR, compile("( 403\n", re));   /* unmatched parenthesis */
+    ASSERT_TRUE(heavybag_ut_emerg_count >= 1u);        /* EMERG was logged */
+}
+
+
 int
 main(int argc, const char *argv[])
 {
