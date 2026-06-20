@@ -791,6 +791,134 @@ CTEST(ua_edge, embedded_nul_then_token_found)
 }
 
 
+/* ===================================================================== *
+ *  Coverage completion: detection arms + static string-table accessors  *
+ *  the happy-path suites above leave these reachable lines uncovered.    *
+ *  Every UA token below is verified against the source detection order.  *
+ * ===================================================================== */
+
+/* webOS TV: "Linux" + "Web0S;" -> OS_WEBOS (Linux-gated webOS arm, :250-251),
+ * device class TV (:394-395). Carries "Linux" (the block is Linux-gated) and
+ * no Android / Windows Phone (both precede the webOS test). */
+CTEST(ua_cover, webos_tv)
+{
+    pr_t r = P("Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/79.0 Safari/537.36");
+    ASSERT_EQUAL(HEAVYBAG_OS_WEBOS, r.o);
+    ASSERT_EQUAL(HEAVYBAG_CAT_TV, r.c);
+}
+
+/* Outlook-iOS/ arm (:334-336), no AppleWebKit -> SAFARI on a non-Android OS. */
+CTEST(ua_cover, outlook_ios_is_safari)
+{
+    pr_t r = P("Outlook-iOS/709.0");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_SAFARI, r.b);
+    ASSERT_TRUE(veq(r, "709.0"));
+}
+
+/* WeatherReport/ arm (:342-344), no AppleWebKit -> SAFARI on a non-Android OS. */
+CTEST(ua_cover, weatherreport_is_safari)
+{
+    pr_t r = P("WeatherReport/1.0");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_SAFARI, r.b);
+    ASSERT_TRUE(veq(r, "1.0"));
+}
+
+/* bare "Safari/" with NO AppleWebKit token (:346-348): the AppleWebKit arm at
+ * :338 is skipped, so the trailing bare-Safari arm fires. */
+CTEST(ua_cover, bare_safari_no_webkit)
+{
+    pr_t r = P("Mozilla/5.0 Safari/537.36");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_SAFARI, r.b);
+    ASSERT_TRUE(veq(r, "537.36"));
+}
+
+/* iPad: "Mac OS X" + "iPad;" but NOT "like Mac OS X"/"iPhone" (:242) -> OS_IPAD,
+ * device class TABLET (:392-393). "like Gecko" must NOT read as "like Mac OS X". */
+CTEST(ua_cover, ipad_tablet)
+{
+    pr_t r = P("Mozilla/5.0 (iPad; CPU OS 14_0; Mac OS X) AppleWebKit/605.1.15 "
+               "(KHTML, like Gecko) Mobile/15E148");
+    ASSERT_EQUAL(HEAVYBAG_OS_IPAD, r.o);
+    ASSERT_EQUAL(HEAVYBAG_CAT_TABLET, r.c);
+}
+
+/* legacy tablet substring fallback "SAMSUNG SM-T" (:412-415): no recognised
+ * OS/browser, so the os switch falls through to the substring fallback. */
+CTEST(ua_cover, legacy_smt_tablet)
+{
+    pr_t r = P("SAMSUNG SM-T230");
+    ASSERT_EQUAL(HEAVYBAG_CAT_TABLET, r.c);
+}
+
+/* legacy mobile substring fallback "DoCoMo" (:427-430): no recognised OS/browser. */
+CTEST(ua_cover, legacy_docomo_mobile)
+{
+    pr_t r = P("DoCoMo/2.0");
+    ASSERT_EQUAL(HEAVYBAG_CAT_MOBILE, r.c);
+}
+
+/* MSIE vendor arm (:469): "compatible; MSIE" -> BROWSER_MSIE -> VENDOR_MS,
+ * with no Edge token (Edge short-circuits MSIE at :303). */
+CTEST(ua_cover, msie_vendor_ms)
+{
+    pr_t r = P("Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.1; Trident/6.0)");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_MSIE, r.b);
+    ASSERT_EQUAL(HEAVYBAG_VENDOR_MS, r.v);
+}
+
+/* XiaoMi vendor arm (:461): the FULL "XiaoMi/MiuiBrowser/" token (:315) is
+ * required -- a bare MiuiBrowser/ would not set XIAOMIBROWSER -> VENDOR_XIAOMI. */
+CTEST(ua_cover, xiaomi_miuibrowser_vendor)
+{
+    pr_t r = P("Mozilla/5.0 (Linux; Android 10) XiaoMi/MiuiBrowser/12.10");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_XIAOMIBROWSER, r.b);
+    ASSERT_EQUAL(HEAVYBAG_VENDOR_XIAOMI, r.v);
+}
+
+/* Whale vendor arm (:471): "Whale/" (:319) wins over the Chrome/Safari tokens
+ * it rides on -> BROWSER_WHALE -> VENDOR_NAVER. */
+CTEST(ua_cover, whale_vendor_naver)
+{
+    pr_t r = P("Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like "
+               "Gecko) Chrome/116.0.0.0 Whale/3.0 Mobile Safari/537.36");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_WHALE, r.b);
+    ASSERT_EQUAL(HEAVYBAG_VENDOR_NAVER, r.v);
+}
+
+/* The three static string-table accessors over their FULL enum range plus an
+ * out-of-range index (the >= MAX bounds clamp -> the UNKNOWN slot). Covers
+ * :621-639 (signatures, clamp branch, return). */
+CTEST(ua_cover, str_tables_full_range)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < HEAVYBAG_BROWSER_MAX; i++) {
+        ngx_str_t *s = ngx_http_heavybag_browser_str((ngx_http_heavybag_ua_browser_e) i);
+        ASSERT_TRUE(s != NULL && s->len > 0);
+    }
+    ASSERT_TRUE(ngx_http_heavybag_browser_str(
+                    (ngx_http_heavybag_ua_browser_e) HEAVYBAG_BROWSER_MAX)
+                == &heavybag_browser_str[HEAVYBAG_BROWSER_UNKNOWN]);
+
+    for (i = 0; i < HEAVYBAG_CAT_MAX; i++) {
+        ngx_str_t *s = ngx_http_heavybag_category_str((ngx_http_heavybag_ua_category_e) i);
+        ASSERT_TRUE(s != NULL && s->len > 0);
+    }
+    ASSERT_TRUE(ngx_http_heavybag_category_str(
+                    (ngx_http_heavybag_ua_category_e) HEAVYBAG_CAT_MAX)
+                == &heavybag_category_str[HEAVYBAG_CAT_UNKNOWN]);
+
+    for (i = 0; i < HEAVYBAG_VENDOR_MAX; i++) {
+        ngx_str_t *s = ngx_http_heavybag_vendor_str((ngx_http_heavybag_ua_vendor_e) i);
+        ASSERT_TRUE(s != NULL && s->len > 0);
+    }
+    ASSERT_TRUE(ngx_http_heavybag_vendor_str(
+                    (ngx_http_heavybag_ua_vendor_e) HEAVYBAG_VENDOR_MAX)
+                == &heavybag_vendor_str[HEAVYBAG_VENDOR_UNKNOWN]);
+}
+
+
 int
 main(int argc, const char *argv[])
 {

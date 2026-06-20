@@ -643,6 +643,14 @@ CTEST(rate, slot_older_than_period_still_evictable)
 
 
 
+/* rate_overflow(NULL): the exported accessor fail-opens to 0 when no zone is
+ * attached (the status handler passes NULL when the rate zone is unconfigured). */
+CTEST(rate, overflow_null_zone_is_zero)
+{
+    ASSERT_EQUAL_U(0, ngx_http_heavybag_rate_overflow(NULL));
+}
+
+
 int
 main(int argc, const char *argv[])
 {
