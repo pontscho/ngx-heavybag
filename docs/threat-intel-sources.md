@@ -1,3 +1,20 @@
+---
+name: threat-intel-sources
+type: reference
+status: current
+title: External Threat-Intel Sources for Header-Attack Fixtures
+description: Catalogue of external, machine-readable threat-intel feeds used to source the WAF header-attack fixtures.
+sources:
+  - modules/ngx_http_heavybag/lists/scanner-ua.list
+  - modules/ngx_http_heavybag/lists/bot.list
+  - modules/ngx_http_heavybag/lists/referer.list
+verified:
+  commit: 7a935b0
+  date: 2026-06-21
+links:
+  - threat-model
+  - honeypot-B-plan
+---
 # External Threat-Intel Sources for Header-Attack Fixtures
 
 **Status:** living catalogue · **Audience:** WAF rule authors + fixture builders

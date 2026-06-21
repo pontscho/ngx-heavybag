@@ -1,3 +1,20 @@
+---
+name: user-agent-plan
+type: adr
+status: draft
+title: Implementation Plan — UA Descriptive Parser + JA4/UA Spoof Detection
+description: Decision record for the descriptive UA parser ($waf_ua_* variables) and the JA4/UA spoof signal.
+sources:
+  - modules/ngx_http_heavybag/src/heavybag_ua_parse.c
+  - modules/ngx_http_heavybag/src/heavybag_ua_parse.h
+  - modules/ngx_http_heavybag/src/heavybag_ja4.c
+  - modules/ngx_http_heavybag/lists/ja4.list
+verified:
+  commit: 7a935b0
+  date: 2026-06-21
+links:
+  - overview
+---
 # Implementation Plan: User-Agent Descriptive Parser + JA4/UA Spoof Detection for heavybag
 
 ## Requirements Summary
