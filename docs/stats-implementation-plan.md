@@ -1,3 +1,19 @@
+---
+name: stats-implementation-plan
+type: adr
+status: draft
+title: Implementation Plan — Statistics / Status Module
+description: Decision record for the lock-free statistics subsystem and the waf_status endpoint (plain/json/prometheus).
+sources:
+  - modules/ngx_http_heavybag/src/heavybag_status.c
+  - modules/ngx_http_heavybag/src/heavybag_status.h
+  - modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c
+verified:
+  commit: 7a935b0
+  date: 2026-06-21
+links:
+  - overview
+---
 # Implementation Plan: heavybag Statistics / Status Module
 
 ## Requirements Summary

@@ -1,3 +1,15 @@
+---
+name: history-1
+type: analysis
+status: draft
+title: Session Checkpoint / Work History (S1–S18)
+description: Cross-session work-log and decision dump. Candidate for removal — git history is authoritative (see PROPOSE-DELETE).
+verified:
+  commit: 7a935b0
+  date: 2026-06-21
+links:
+  - overview
+---
 # Session Checkpoint
 
 **Last updated:** 2026-06-15 (local, S18)

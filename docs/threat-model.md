@@ -1,3 +1,23 @@
+---
+name: threat-model
+type: analysis
+status: current
+title: Edge Threat Model & Honeypot Analysis
+description: Empirical attack-surface analysis over the 1.65M-request edge log corpus driving scanners.list and geo/ASN tuning.
+sources:
+  - ngxlogs/access.log
+  - modules/ngx_http_heavybag/lists/scanners.list
+  - modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_scanner_lookup
+  - modules/ngx_http_heavybag/src/heavybag_geo.c
+  - reference/geolookup.c
+verified:
+  commit: 7a935b0
+  date: 2026-06-21
+links:
+  - threat-intel-sources
+  - honeypot-B-plan
+  - overview
+---
 # Edge Threat Model & Honeypot Analysis
 
 **Status:** living document · **Audience:** module authors + edge operators

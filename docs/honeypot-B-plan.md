@@ -1,3 +1,21 @@
+---
+name: honeypot-B-plan
+type: adr
+status: draft
+title: Work-stream B — Detect-mode FP/TP Replay (plan)
+description: Decision record for the detect-mode replay harness that measures FP/TP coverage from would_block counters.
+sources:
+  - modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c
+  - modules/ngx_http_heavybag/src/heavybag_status.c
+  - modules/ngx_http_heavybag/tests/run-replay-tests.sh
+  - modules/ngx_http_heavybag/tests/heavybag-replay-test.conf
+verified:
+  commit: 7a935b0
+  date: 2026-06-21
+links:
+  - threat-model
+  - threat-intel-sources
+---
 # Work-stream B — Detect-mode FP/TP Replay (implementation plan)
 
 **Status:** plan, inspector-reviewed (plan-inspector: APPROVE-WITH-CHANGES;
