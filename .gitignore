@@ -60,6 +60,14 @@ ngxlogs/
 /modules/ngx_http_heavybag/tests/corpus/.render/
 /modules/ngx_http_heavybag/tests/corpus/.config-tmp/
 
+# Stress campaign per-run artifacts: the orchestrator writes one timestamped dir
+# per scenario (params.env, raw h2load/wrk2 output, counter-delta.json, cpu-rss.csv,
+# summary.json) under .stress/. These are machine-specific run records, regenerated
+# on every run -- never committed. The DETERMINISTIC corpus (stress-urls.txt) and the
+# tooling (conf, lib, orchestrator, gen-stress-corpus.pl) ARE committed; the campaign
+# RESULT tables live in docs/stress-campaign.md, populated from the summary.json files.
+/modules/ngx_http_heavybag/tests/corpus/.stress/
+
 # Python bytecode cache (created when the offline ja4.list regen script under
 # modules/ngx_http_heavybag/tools/ is imported as a module for diagnostics; never
 # source -- the .py itself is committed, the cache is regenerated on demand).

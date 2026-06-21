@@ -1085,6 +1085,58 @@ lock-free rate limiter and status counters is a separate opt-in
 (`HEAVYBAG_TSAN=1`, ~4 s — kept out of the default gate).
 </details>
 
+### Stress & load testing
+
+The correctness suite proves *what* the WAF decides; the stress campaign measures
+the *cost* of deciding and proves the lock-free counters/buckets stay consistent
+under genuine concurrency. It is reproducible by construction (deterministic
+committed URL corpus, baked nginx-side config, machine-relative ratios). See the
+operational guide [`docs/stress-testing.md`](docs/stress-testing.md) (install, run,
+read results, troubleshoot) and the results ledger [`docs/stress-campaign.md`](docs/stress-campaign.md).
+
+<details>
+<summary><b>Scenarios, tools, and the correctness gate</b></summary>
+
+Five scenarios across all three heads (HTTP / stream / mail), driven by **h2load**
+(nghttp2, H1/H2/H3) and **wrk2** (Gil Tene's constant-arrival fork):
+
+| ID | Measures | Tool | Gate |
+|---|---|---|---|
+| S1 | enforce-vs-`waf off` req/s ratio + latency distribution | h2load | — |
+| S2 | rate-limiter accuracy (429-share vs theory) | wrk2 `-R` | — |
+| S3 | **counter correctness under concurrent load** | h2load + curl | **yes** |
+| S4 | CPU% / RSS under a warmup→burst→cooldown profile | h2load | — |
+| S5 | long-run RSS/fd trend + reload cycling (opt-in) | h2load | leak |
+
+The S3 gate asserts, on the status-endpoint counter delta around a concurrent
+mixed-load window:
+
+```
+HTTP:   Δhttp_requests_total      == Δhttp_allowed   + Σ Δhttp_blocked[reason]
+STREAM: Δstream_connections_total == Δstream_allowed + Σ Δstream_denied[reason]
+MAIL:   wire-only (Auth-Status OK/deny) — the mail head moves no status counter
+```
+
+The HTTP head and the stream head share one `waf_rate` shm zone, so loading both
+at once with `worker_processes ≥ 2` is the real lock-free race the TSan
+micro-bench only approximates.
+
+```sh
+# smoke gate (~10s/scenario; pass/fail = S3 invariants)
+bash modules/ngx_http_heavybag/tests/run-stress-tests.sh --quick
+#   or: ctest --test-dir build -R heavybag_stress
+
+# full reference run; opt-in soak
+bash modules/ngx_http_heavybag/tests/run-stress-tests.sh
+HB_STRESS_SOAK_OPT_IN=1 HB_SOAK_DUR=3600 ctest --test-dir build -R heavybag_soak
+```
+
+The load tools are probed at start: missing h2load → the harness exits 2
+(CTest SKIPPED); a non-`-R` `wrk` → S2 SKIPs; an h2load without QUIC → the H3
+dimension SKIPs. Per-run artifacts (counter deltas, CPU/RSS timeseries, HDR
+histograms, `summary.json`) land under `tests/corpus/.stress/` (gitignored).
+</details>
+
 ## Runtime behavior
 
 The HTTP head's per-request decision chain (cheap → expensive; the **first**

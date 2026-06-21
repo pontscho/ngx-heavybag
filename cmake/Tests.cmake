@@ -113,6 +113,22 @@ heavybag_add_test(heavybag_spoof        run-spoof-fuzz.sh       LABELS "integrat
 # and all would_block deltas are 0); the main coverage replay is bounded by LIMIT.
 heavybag_add_test(heavybag_replay       run-replay-tests.sh     LABELS "integration;replay"  TIMEOUT 900  NGINX_BOUND  ENV "LIMIT=200")
 
+# --- stress / load campaign (docs/stress-campaign.md) -------------------------
+# heavybag_stress is the SMOKE gate: run-stress-tests.sh --quick drives a ~10s/
+# scenario load and the pass/fail is the S3 counter invariant
+# (d(http_requests_total)==d(allowed)+sum d(blocked), and the stream analogue).
+# It needs h2load (nghttp2); without it the harness exits 2 -> CTest SKIPPED, so
+# `ctest` on a host without the load tools is harmless. NGINX_BOUND: it starts a
+# real master on the 283xx band and shares the sandbox .so, so it takes the
+# sandbox resource lock like the other live harnesses.
+heavybag_add_test(heavybag_stress       run-stress-tests.sh     LABELS "integration;stress"   TIMEOUT 900  NGINX_BOUND  ENV "HB_STRESS_MODE=quick")
+
+# heavybag_soak is OPT-IN: a bare `ctest` SKIPs it instantly (the harness exits 2
+# unless HB_STRESS_SOAK_OPT_IN=1). Run it deliberately for a long stability pass:
+#   HB_STRESS_SOAK_OPT_IN=1 HB_SOAK_DUR=3600 ctest --test-dir build -R heavybag_soak
+# The pass/fail is the RSS least-squares slope leak gate.
+heavybag_add_test(heavybag_soak         run-stress-tests.sh     LABELS "integration;soak"     TIMEOUT 14400 NGINX_BOUND  ENV "HB_STRESS_MODE=soak")
+
 # --- honeypot-D offline ASN/geo analysis (no nginx; SKIPs if inputs absent) ---
 # Pure read-only analysis pipeline: builds reference/geolookup.c, extracts the
 # per-IP volume feed, joins it with geo. Exits 2 (-> CTest SKIPPED) when the raw
