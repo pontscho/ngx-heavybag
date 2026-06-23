@@ -18,7 +18,7 @@
 {"classes":["php"],"count":1781,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/phpinfo.php"}
 {"classes":["php"],"count":1697,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/admin.php"}
 {"classes":["secret_vcs"],"count":1680,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.save"}
-{"classes":["secret_vcs"],"count":1648,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.example"}
+{"classes":["secret_vcs"],"count":1652,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.example"}
 {"classes":["secret_vcs"],"count":1524,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/laravel/.env"}
 {"classes":["secret_vcs"],"count":1499,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.production"}
 {"classes":["uncatalogued"],"count":1476,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/_profiler/phpinfo"}
@@ -207,7 +207,6 @@
 {"classes":["php"],"count":446,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/moon.php"}
 {"classes":["php","wordpress"],"count":444,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/wp-admin/js/index.php"}
 {"classes":["php"],"count":438,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/class-t.api.php"}
-{"classes":["uncatalogued"],"count":438,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/webapp/token"}
 {"classes":["secret_vcs"],"count":436,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.staging"}
 {"classes":["php"],"count":434,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/default.php"}
 {"classes":["php"],"count":430,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/ahax.php"}
@@ -228,7 +227,6 @@
 {"classes":["php"],"count":397,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/content.php"}
 {"classes":["php","wordpress"],"count":395,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/wp-admin/css/colors/blue/index.php"}
 {"classes":["secret_vcs"],"count":394,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.live"}
-{"classes":["uncatalogued"],"count":390,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/webapp/ws"}
 {"classes":["wordpress"],"count":389,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/wp-content/themes/"}
 {"classes":["php"],"count":388,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/php_info.php"}
 {"classes":["secret_vcs"],"count":384,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/prod/.env"}
@@ -7082,6 +7080,7 @@
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/elfinder/src/connectors/php/connector.php"}
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/en0.php"}
 {"classes":["uncatalogued"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/env.yml"}
+{"classes":["secret_vcs"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example.com/.env"}
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example.php"}
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/f2.php"}
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/fck.php"}
@@ -7185,7 +7184,6 @@
 {"classes":["secret_vcs"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/support/.git/config"}
 {"classes":["secret_vcs"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/symfony/.env.local"}
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/t.php?p="}
-{"classes":["secret_vcs"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example.com/.env"}
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/templates/atomic/templates.php"}
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/templates/beez_20/error.php"}
 {"classes":["php"],"count":10,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/templates/beez_20/index.php"}
@@ -12361,7 +12359,6 @@
 {"classes":["secret_vcs"],"count":4,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.save~"}
 {"classes":["secret_vcs"],"count":4,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.smtp_server"}
 {"classes":["secret_vcs"],"count":4,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.sqlite"}
-{"classes":["secret_vcs"],"count":4,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.example"}
 {"classes":["secret_vcs"],"count":4,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env.toml"}
 {"classes":["secret_vcs"],"count":4,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env?raw"}
 {"classes":["secret_vcs"],"count":4,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/.env_classes"}
@@ -19087,6 +19084,7 @@
 {"classes":["php"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/ethan.php"}
 {"classes":["php"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/eursi.php"}
 {"classes":["secret_vcs"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example/%2eenv"}
+{"classes":["secret_vcs"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example/.git/config"}
 {"classes":["uncatalogued"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example/example.env"}
 {"classes":["secret_vcs"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example02-golang-package/import-underscore/%2eenv"}
 {"classes":["secret_vcs"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example27-how-to-load-env/sample01/%2eenv"}
@@ -20880,7 +20878,6 @@
 {"classes":["php"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/tab_licitacoes-old.php"}
 {"classes":["php"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/tablepress_controllers.php"}
 {"classes":["php"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/taf.php"}
-{"classes":["secret_vcs"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/example/.git/config"}
 {"classes":["php"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/tangelos.php"}
 {"classes":["php"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/tarc.php"}
 {"classes":["secret_vcs"],"count":2,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/target/%2eenv"}
@@ -32530,8 +32527,6 @@
 {"classes":["php"],"count":1,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/panel/test%2ephp"}
 {"classes":["secret_vcs"],"count":1,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/papertrail/%2eenv"}
 {"classes":["uncatalogued"],"count":1,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/params.yaml"}
-{"classes":["uncatalogued"],"count":1,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/webapp/?theme={%22background%22:%22"}
-{"classes":["uncatalogued"],"count":1,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/webapp/ws?theme={%22background%22:%22"}
 {"classes":["php"],"count":1,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/parser.php"}
 {"classes":["secret_vcs"],"count":1,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/partner/%2eenv"}
 {"classes":["secret_vcs"],"count":1,"dim":"path","expected_reason":"scanner_path","expected_status":404,"method":"GET","uri":"/partners/%2eenv"}
