@@ -115,6 +115,7 @@ static ngx_str_t  heavybag_vendor_str[] = {
     HEAVYBAG_S("twitter"),     /* HEAVYBAG_VENDOR_TWITTER    */
     HEAVYBAG_S("huawei"),      /* HEAVYBAG_VENDOR_HUAWEI     */
     HEAVYBAG_S("naver"),       /* HEAVYBAG_VENDOR_NAVER      */
+    HEAVYBAG_S("amazon"),      /* HEAVYBAG_VENDOR_AMAZON     */
 };
 
 
@@ -493,6 +494,8 @@ heavybag_ua_try_vendor(const u_char *ua, size_t n, ngx_http_heavybag_ua_os_e os,
     if (HEAVYBAG_HAS(ua, n, "Baiduspider"))           { return HEAVYBAG_VENDOR_BAIDU; }
     if (HEAVYBAG_HAS(ua, n, "Twitterbot/"))           { return HEAVYBAG_VENDOR_TWITTER; }
     if (HEAVYBAG_HAS(ua, n, "PanguBot"))              { return HEAVYBAG_VENDOR_HUAWEI; }
+    if (HEAVYBAG_HAS(ua, n, "PetalBot"))              { return HEAVYBAG_VENDOR_HUAWEI; }
+    if (HEAVYBAG_HAS(ua, n, "Amazonbot"))             { return HEAVYBAG_VENDOR_AMAZON; }
     if (HEAVYBAG_HAS(ua, n, "Yandex"))                { return HEAVYBAG_VENDOR_YANDEX; }
 
     return HEAVYBAG_VENDOR_UNKNOWN;
