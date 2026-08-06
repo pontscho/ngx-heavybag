@@ -238,6 +238,33 @@ CTEST(ua_vendor, googlebot)
     ASSERT_EQUAL(HEAVYBAG_VENDOR_GOOGLE, r.v);
 }
 
+CTEST(ua_vendor, adsbot_google)
+{
+    pr_t r = P("AdsBot-Google (+http://www.google.com/adsbot.html)");
+    ASSERT_EQUAL(HEAVYBAG_VENDOR_GOOGLE, r.v);
+}
+
+CTEST(ua_vendor, storebot_google)
+{
+    pr_t r = P("Mozilla/5.0 (compatible; Storebot-Google/1.0; "
+               "+http://www.google.com/bot.html)");
+    ASSERT_EQUAL(HEAVYBAG_VENDOR_GOOGLE, r.v);
+}
+
+CTEST(ua_vendor, amazonbot)
+{
+    pr_t r = P("Mozilla/5.0 (compatible; Amazonbot/0.1; "
+               "+https://developer.amazon.com/support/amazonbot)");
+    ASSERT_EQUAL(HEAVYBAG_VENDOR_AMAZON, r.v);
+}
+
+CTEST(ua_vendor, petalbot)
+{
+    pr_t r = P("Mozilla/5.0 (compatible; PetalBot;"
+               "+https://webmaster.petalsearch.com/site/petalbot)");
+    ASSERT_EQUAL(HEAVYBAG_VENDOR_HUAWEI, r.v);
+}
+
 CTEST(ua_vendor, bingbot)
 {
     pr_t r = P("Mozilla/5.0 (compatible; bingbot/2.0; "
