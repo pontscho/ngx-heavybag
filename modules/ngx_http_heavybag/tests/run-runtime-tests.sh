@@ -21,7 +21,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/openresty}
+ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
 SBX=$ROOT/sandbox
 NGINX=$SBX/sbin/nginx
 TESTS=$ROOT/modules/ngx_http_heavybag/tests
@@ -36,7 +36,7 @@ STAT=http://127.0.0.1:28611/waf/stat/plain
 # absolute paths follow a relocated checkout (the sed is a no-op on the default root).
 HB_RENDER_DIR=$TESTS/corpus/.render
 mkdir -p "$HB_RENDER_DIR"
-hb_render() { local d="$HB_RENDER_DIR/$(basename "$1")"; sed "s#/mnt/nvme/imaginarium/openresty#$ROOT#g" "$1" > "$d"; printf '%s' "$d"; }
+hb_render() { local d="$HB_RENDER_DIR/$(basename "$1")"; sed "s#/mnt/nvme/imaginarium/ngx-heavybag#$ROOT#g" "$1" > "$d"; printf '%s' "$d"; }
 SCONF=$(hb_render "$SCONF"); RCONF=$(hb_render "$RCONF")
 
 pass=0; fail=0

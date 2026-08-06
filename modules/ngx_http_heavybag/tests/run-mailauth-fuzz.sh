@@ -29,7 +29,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/openresty}
+ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
 SBX=$ROOT/sandbox
 NGINX=$SBX/sbin/nginx
 TESTS=$ROOT/modules/ngx_http_heavybag/tests
@@ -50,7 +50,7 @@ if [ -z "$EXTIP" ]; then EXTIP=127.0.0.1; EXT_AVAIL=0; fi
 HB_RENDER_DIR=$TESTS/corpus/.render
 mkdir -p "$HB_RENDER_DIR"
 CONF=$HB_RENDER_DIR/heavybag-mailauth-fuzz.conf
-sed -e "s#/mnt/nvme/imaginarium/openresty#$ROOT#g" \
+sed -e "s#/mnt/nvme/imaginarium/ngx-heavybag#$ROOT#g" \
     -e "s#__HB_EXTIP__#$EXTIP#g" "$SRC_CONF" > "$CONF"
 
 pass=0; fail=0; skip=0

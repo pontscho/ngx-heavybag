@@ -30,7 +30,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/openresty}
+ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
 HERE=$ROOT/modules/ngx_http_heavybag/tests
 # shellcheck source=/dev/null
 . "$HERE/stress/stress-lib.sh"
@@ -90,7 +90,7 @@ fi
 RENDER_DIR=$CORPUS/.render
 mkdir -p "$RENDER_DIR" "$ARTI"
 CONF=$RENDER_DIR/heavybag-stress-test.conf
-sed -e "s#/mnt/nvme/imaginarium/openresty#$ROOT#g" \
+sed -e "s#/mnt/nvme/imaginarium/ngx-heavybag#$ROOT#g" \
     -e "s/^worker_processes  2;/worker_processes  $HB_WORKERS;/" \
     "$SRC_CONF" > "$CONF"
 

@@ -22,7 +22,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/openresty}
+ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
 SBX=$ROOT/sandbox
 NGINX=$SBX/sbin/nginx
 TESTS=$ROOT/modules/ngx_http_heavybag/tests
@@ -37,7 +37,7 @@ mkdir -p "$TMP"
 HB_RENDER_DIR=$TESTS/corpus/.render
 mkdir -p "$HB_RENDER_DIR"
 CONF=$HB_RENDER_DIR/heavybag-spoof-fuzz.conf
-sed "s#/mnt/nvme/imaginarium/openresty#$ROOT#g" "$SRC_CONF" > "$CONF"
+sed "s#/mnt/nvme/imaginarium/ngx-heavybag#$ROOT#g" "$SRC_CONF" > "$CONF"
 
 UA_CHROME='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 UA_EDGE='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'

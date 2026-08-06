@@ -31,7 +31,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/openresty}
+ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
 SBX=$ROOT/sandbox
 NGINX=$SBX/sbin/nginx
 MOD=$ROOT/modules/ngx_http_heavybag

@@ -30,7 +30,7 @@ use Getopt::Long;
 use File::Basename;
 
 # --- resolve the tests/corpus dir relative to this script (tools/ -> tests/) ---
-my $root   = $ENV{HEAVYBAG_ROOT} // '/mnt/nvme/imaginarium/openresty';
+my $root   = $ENV{HEAVYBAG_ROOT} // '/mnt/nvme/imaginarium/ngx-heavybag';
 my $corpus = "$root/modules/ngx_http_heavybag/tests/corpus";
 
 my $in          = "$corpus/replay-vectors.jsonl";

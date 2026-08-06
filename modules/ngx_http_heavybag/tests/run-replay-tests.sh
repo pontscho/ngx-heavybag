@@ -8,7 +8,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/openresty}
+ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
 SBX=$ROOT/sandbox
 NGINX=$SBX/sbin/nginx
 CONF=$ROOT/modules/ngx_http_heavybag/tests/heavybag-replay-test.conf
@@ -16,7 +16,7 @@ CONF=$ROOT/modules/ngx_http_heavybag/tests/heavybag-replay-test.conf
 # paths follow a relocated checkout (the sed is a no-op on the default root).
 HB_RENDER_DIR=$ROOT/modules/ngx_http_heavybag/tests/corpus/.render
 mkdir -p "$HB_RENDER_DIR"
-hb_render() { local d="$HB_RENDER_DIR/$(basename "$1")"; sed "s#/mnt/nvme/imaginarium/openresty#$ROOT#g" "$1" > "$d"; printf '%s' "$d"; }
+hb_render() { local d="$HB_RENDER_DIR/$(basename "$1")"; sed "s#/mnt/nvme/imaginarium/ngx-heavybag#$ROOT#g" "$1" > "$d"; printf '%s' "$d"; }
 CONF=$(hb_render "$CONF")
 CORPUS=$ROOT/modules/ngx_http_heavybag/tests/corpus
 export CORPUS

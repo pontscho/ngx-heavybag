@@ -153,7 +153,7 @@ Add a lock-free statistics and status subsystem to the existing `ngx_http_heavyb
 ## Architecture Analysis
 
 Key findings from codebase exploration (all `file:line` anchors verified against the
-live tree at `/mnt/nvme/imaginarium/openresty/modules/ngx_http_heavybag/`):
+live tree at `/mnt/nvme/imaginarium/ngx-heavybag/modules/ngx_http_heavybag/`):
 
 - **No shared state today.** `ngx_http_heavybag.h:57-61` explicitly documents that the
   module carries no shared writable state; workers are stateless w.r.t. each other.

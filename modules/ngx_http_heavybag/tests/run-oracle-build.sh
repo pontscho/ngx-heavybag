@@ -23,7 +23,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/openresty}
+ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
 REF=$ROOT/reference
 OSSL=$ROOT/build/openssl_src-prefix/src/openssl_src/.openssl
 CC=${CC:-cc}
