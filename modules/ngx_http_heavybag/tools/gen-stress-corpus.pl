@@ -25,12 +25,14 @@
 
 use strict;
 use warnings;
+use FindBin;
+use Cwd qw(abs_path);
 use JSON::PP;
 use Getopt::Long;
 use File::Basename;
 
 # --- resolve the tests/corpus dir relative to this script (tools/ -> tests/) ---
-my $root   = $ENV{HEAVYBAG_ROOT} // '/mnt/nvme/imaginarium/ngx-heavybag';
+my $root   = $ENV{HEAVYBAG_ROOT} // abs_path("$FindBin::Bin/../../..");
 my $corpus = "$root/modules/ngx_http_heavybag/tests/corpus";
 
 my $in          = "$corpus/replay-vectors.jsonl";

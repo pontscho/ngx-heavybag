@@ -20,7 +20,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
+ROOT=${HEAVYBAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 SBX=$ROOT/sandbox
 NGINX=$SBX/sbin/nginx
 TESTS=$ROOT/modules/ngx_http_heavybag/tests
@@ -32,7 +32,7 @@ HTML=$SBX/html
 HB_RENDER_DIR=$TESTS/corpus/.render
 mkdir -p "$HB_RENDER_DIR"
 CONF=$HB_RENDER_DIR/heavybag-repprec-test.conf
-sed "s#/mnt/nvme/imaginarium/ngx-heavybag#$ROOT#g" "$SRC_CONF" > "$CONF"
+sed "s#@HB_ROOT@#$ROOT#g" "$SRC_CONF" > "$CONF"
 
 LOCS="base cg cg2 ca ca2 ca3 cf cf2 r1 r2 r3 r4 r5 r6a r6b r8"
 

@@ -12,7 +12,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
+ROOT=${HEAVYBAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 SBX=$ROOT/sandbox
 NGINX=$SBX/sbin/nginx
 CONF=$ROOT/modules/ngx_http_heavybag/tests/heavybag-stat-test.conf
@@ -20,7 +20,7 @@ CONF=$ROOT/modules/ngx_http_heavybag/tests/heavybag-stat-test.conf
 # paths follow a relocated checkout (the sed is a no-op on the default root).
 HB_RENDER_DIR=$ROOT/modules/ngx_http_heavybag/tests/corpus/.render
 mkdir -p "$HB_RENDER_DIR"
-hb_render() { local d="$HB_RENDER_DIR/$(basename "$1")"; sed "s#/mnt/nvme/imaginarium/ngx-heavybag#$ROOT#g" "$1" > "$d"; printf '%s' "$d"; }
+hb_render() { local d="$HB_RENDER_DIR/$(basename "$1")"; sed "s#@HB_ROOT@#$ROOT#g" "$1" > "$d"; printf '%s' "$d"; }
 CONF=$(hb_render "$CONF")
 STAT=http://127.0.0.1:28090/waf/stat
 A=http://127.0.0.1:28080

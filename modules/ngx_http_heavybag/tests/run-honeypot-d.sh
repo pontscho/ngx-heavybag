@@ -27,7 +27,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
+ROOT=${HEAVYBAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 CORPUS=$ROOT/modules/ngx_http_heavybag/tests/corpus
 TOOLS=$ROOT/modules/ngx_http_heavybag/tools
 SRC=$ROOT/reference/geolookup.c

@@ -43,7 +43,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
+ROOT=${HEAVYBAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 NSRC=$ROOT/build/nginx_ext-prefix/src/nginx_ext
 NGINX=$ROOT/sandbox/sbin/nginx
 TOUCH_GUARD=$ROOT/build/ssl-touch-guard.sh

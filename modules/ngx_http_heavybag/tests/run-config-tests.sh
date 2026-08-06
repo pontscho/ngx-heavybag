@@ -31,7 +31,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/mnt/nvme/imaginarium/ngx-heavybag}
+ROOT=${HEAVYBAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 SBX=$ROOT/sandbox
 NGINX=$SBX/sbin/nginx
 MOD=$ROOT/modules/ngx_http_heavybag
