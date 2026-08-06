@@ -23,7 +23,7 @@
 
 set -u
 
-ROOT=${HEAVYBAG_ROOT:-/path/to/ngx-heavybag}
+ROOT=${HEAVYBAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 REF=$ROOT/reference
 OSSL=$ROOT/build/openssl_src-prefix/src/openssl_src/.openssl
 CC=${CC:-cc}
