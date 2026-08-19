@@ -178,16 +178,21 @@ trees, no manual `./configure` dance.
     builds it in-tree via `--with-openssl=<src>`.
   - **zlib-ng 2.3.3** — built statically (`--zlib-compat --static`) and
     linked in place of the system dynamic zlib.
-  - **nginx 1.31.2** — configured with the full flag set and the heavybag module
-    as a dynamic add-on. Bumped from 1.30.2: the 1.31.2 mainline release fixes
-    three memory-corruption CVEs relevant to an edge proxy — a use-after-free in
-    `ngx_http_v3_module` (CVE-2026-42530), a buffer overflow in
-    `ngx_http_proxy_v2_module`/`ngx_http_grpc_module` (CVE-2026-42055), and a
-    buffer overread in `ngx_http_charset_module` (CVE-2026-48142).
+  - **nginx 1.31.3** — configured with the full flag set and the heavybag module
+    as a dynamic add-on. The 1.31.3 mainline release (15 Jul 2026) fixes three
+    more memory-corruption CVEs relevant to an edge proxy — a heap overflow in
+    the `map` directive's regex handling (CVE-2026-42533, directly relevant to
+    the WAF's regex maps), a use-after-free in `ngx_http_ssi_filter_module` on
+    crafted proxied responses (CVE-2026-56434), and an uninitialized-memory
+    disclosure via unnamed regex captures (CVE-2026-60005).
 
-Versions/URLs/hashes are pinned in [`cmake/Versions.cmake`](cmake/Versions.cmake);
-bump a `PKG_*` there (or pass `-DPKG_*_VERSION=…`) to change a dependency.
-PCRE2 stays at the bundled 10.47 (current stable; built in-tree with JIT).
+Versions and URLs are pinned in [`cmake/Versions.cmake`](cmake/Versions.cmake);
+bump a `PKG_*_VERSION` there (or pass `-DPKG_*_VERSION=…`) to change a
+dependency — that is the whole edit. The matching SHA256 is resolved
+automatically (the tarball is fetched once into `build/dl-cache/`, hashed, and
+reused), so no hash is pasted by hand; pass `-D<DEP>_SHA256=<hex>` to pin one
+explicitly for an audited build. PCRE2 stays at the bundled 10.47 (current
+stable; built in-tree with JIT).
 
 ### One-shot build
 
