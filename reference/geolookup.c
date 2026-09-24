@@ -8,10 +8,15 @@
  *     <ip>\t<CC>\t<ASN>\t<flags_hex>
  *
  * A faithful, libc-only port of the bounds-guarded radix-trie reader in
- * modules/ngx_http_waf/src/waf_geo.c -- the *fixed* walk/lookup, NOT the
- * pre-fix reference/loctest.c, whose main() reads the ND leaf with no
+ * modules/ngx_http_heavybag/src/heavybag_geo.c -- the *fixed* walk/lookup, NOT
+ * the pre-fix reference/loctest.c, whose main() reads the ND leaf with no
  * `net*12+12 <= len[ND]` guard and whose `nxt *= 12` can wrap before its
- * bounds check. Both size_t guards from waf_geo.c are preserved here.
+ * bounds check. Ported from heavybag_geo.c: the width-independent entry bound
+ * (geo_entry_oob, `idx >= len/12` before any multiply) at all three trie sites,
+ * and the fail-closed IPv4-root descent (a zero child anywhere in the /96
+ * chain is a hard error, never a silent fallback to the v6 root). Not ported:
+ * the post-mmap size re-check -- a short-lived offline run just dies on SIGBUS.
+ * (The waf_geo.c:NN line references below predate the rename.)
  *
  * The libloc signature verification (waf_geo.c ngx_http_waf_geo_verify) is
  * deliberately SKIPPED: this is offline analysis of the local, already-trusted
@@ -78,6 +83,15 @@ static uint16_t
 geo_u16(const unsigned char *p)
 {
     return (uint16_t) (((uint16_t) p[0] << 8) | (uint16_t) p[1]);
+}
+
+
+/* 12-byte entry idx outside a block of len bytes? Division, so it cannot wrap
+ * on ILP32 (heavybag_geo.c:ngx_http_heavybag_geo_entry_oob). */
+static int
+geo_entry_oob(uint32_t idx, uint32_t len)
+{
+    return idx >= len / 12;
 }
 
 
@@ -159,15 +173,21 @@ geo_open(geo_db_t *db, const char *path)
     /* Descend the v6 trie to the IPv4-mapped root (::ffff:0:0/96). */
     nxt = 0;
     for (i = 0; i < 96; i++) {
-        size_t off = (size_t) nxt * 12;
-
-        if (off + 12 > db->block_len[GEO_NT]) {
+        if (geo_entry_oob(nxt, db->block_len[GEO_NT])) {
             fprintf(stderr, "geolookup: database \"%s\" truncated network tree\n",
                     path);
             munmap(base, size);
             return -1;
         }
-        nxt = geo_u32(db->block[GEO_NT] + off + (i < 80 ? 0 : 4));
+        nxt = geo_u32(db->block[GEO_NT] + (size_t) nxt * 12 + (i < 80 ? 0 : 4));
+
+        /* node 0 is the v6 root: a zero child means the /96 chain is absent */
+        if (nxt == 0) {
+            fprintf(stderr, "geolookup: database \"%s\" does not reach the "
+                    "IPv4-mapped root\n", path);
+            munmap(base, size);
+            return -1;
+        }
     }
     db->ipv4root = nxt;
 
@@ -191,10 +211,10 @@ geo_walk(geo_db_t *db, const unsigned char *addr, unsigned addrlen, uint32_t nxt
     size_t          off;
 
     do {
-        off = (size_t) nxt * 12;
-        if (off + 12 > ntlen) {
+        if (geo_entry_oob(nxt, ntlen)) {
             return -1;
         }
+        off = (size_t) nxt * 12;
 
         net = geo_u32(nt + off + 8);
         if (!(net & 0x80000000)) {
@@ -244,7 +264,7 @@ geo_lookup(geo_db_t *db, const char *ip, unsigned char cc[2],
         return 0;
     }
 
-    if (net < 0 || (size_t) net * 12 + 12 > db->block_len[GEO_ND]) {
+    if (net < 0 || geo_entry_oob((uint32_t) net, db->block_len[GEO_ND])) {
         return 0;
     }
 
