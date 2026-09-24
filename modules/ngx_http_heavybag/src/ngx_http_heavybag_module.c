@@ -48,7 +48,7 @@ static ngx_http_output_header_filter_pt  ngx_http_heavybag_next_reason_filter;
  * categories occupy [0, HEAVYBAG_UA_LIST_MAX); REGULAR and EMPTY follow. A hit is
  * returned by reference (static literal), never copied.
  */
-ngx_str_t  heavybag_type_str[HEAVYBAG_UA_MAX] = {
+ngx_str_t  ngx_http_heavybag_type_str[HEAVYBAG_UA_MAX] = {
     ngx_string("scanner"),
     ngx_string("ai-crawler"),
     ngx_string("crawler"),
@@ -64,7 +64,7 @@ ngx_str_t  heavybag_type_str[HEAVYBAG_UA_MAX] = {
  * table only renders the token. A hit is returned by reference (static
  * literal), never copied. Must stay in lockstep with ngx_http_heavybag_reason_e.
  */
-ngx_str_t  heavybag_reason_str[HEAVYBAG_REASON_MAX] = {
+ngx_str_t  ngx_http_heavybag_reason_str[HEAVYBAG_REASON_MAX] = {
     ngx_string("none"),
     ngx_string("allowlist"),
     ngx_string("blocklist"),
@@ -508,6 +508,34 @@ ngx_module_t  ngx_http_heavybag_module = {
 
 
 /*
+ * Fetch the per-request heavybag ctx, allocating and attaching it on first
+ * touch. Zeroed by ngx_pcalloc, so every lazy guard (classified, geo_done,
+ * ua_parsed, ...) starts unset. Returns NULL only on pool-allocation failure;
+ * callers in a handler map that to NGX_ERROR, variable getters to NGX_ERROR,
+ * and the spoof filter to NGX_ERROR as well.
+ */
+ngx_http_heavybag_ctx_t *
+ngx_http_heavybag_get_ctx(ngx_http_request_t *r)
+{
+    ngx_http_heavybag_ctx_t  *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
+    if (ctx != NULL) {
+        return ctx;
+    }
+
+    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
+    if (ctx == NULL) {
+        return NULL;
+    }
+
+    ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+
+    return ctx;
+}
+
+
+/*
  * Resolve the canonical client address (socket peer, or the X-Forwarded-For
  * real client when the peer is a trusted proxy). Lazy + cached in ctx so it is
  * correct on internal-redirect / named-location passes too: POST_READ does not
@@ -571,13 +599,9 @@ ngx_http_heavybag_postread_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
+    ctx = ngx_http_heavybag_get_ctx(r);
     if (ctx == NULL) {
-        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-        if (ctx == NULL) {
-            return NGX_ERROR;
-        }
-        ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+        return NGX_ERROR;
     }
 
     /* prime the canonical client address on the main request; the lazy resolver
@@ -710,11 +734,17 @@ ngx_http_heavybag_stat_http_block(ngx_http_heavybag_stat_shm_t *sh, ngx_uint_t i
  * is returned. FAIL-CLOSED: detect is the ONLY non-blocking branch; any
  * unexpected mode value blocks. sh / idx are re-resolved from r so callers
  * need not thread them through.
+ *
+ * cc16 is the caller's verdict country packed ISO-2 (0 when no geo lookup ran
+ * or no record was found -- cc_bump is a no-op on 0), so the per-country
+ * blocked counter is bumped HERE rather than re-pasted as an epilogue at every
+ * block point. The detect arm deliberately keeps its own ctx->geo_done source
+ * (lifecycle-02, see below): both arms are unchanged in behaviour.
  */
 static ngx_int_t
 ngx_http_heavybag_finalize_decision(ngx_http_request_t *r, ngx_http_heavybag_ctx_t *ctx,
     ngx_http_heavybag_loc_conf_t *wlcf, ngx_http_heavybag_reason_e reason,
-    ngx_int_t block_code)
+    ngx_int_t block_code, uint16_t cc16)
 {
     ngx_uint_t                      idx;
     ngx_uint_t                      count;
@@ -771,13 +801,23 @@ ngx_http_heavybag_finalize_decision(ngx_http_request_t *r, ngx_http_heavybag_ctx
         }
 
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                      "heavybag: would-block (%V) [detect]", &heavybag_reason_str[reason]);
+                      "heavybag: would-block (%V) [detect]",
+                      &ngx_http_heavybag_reason_str[reason]);
 
         return NGX_DECLINED;
     }
 
     if (count) {
         ngx_http_heavybag_stat_http_block(sh, idx, ctx, reason, block_code);
+
+        /*
+         * Per-country blocked counter for the enforce path, formerly pasted
+         * after every one of the 11 block points. sh is non-NULL only when the
+         * status zone exists and `count` re-applies the r->internal gate the
+         * callers used to get from their own sh being NULL, so the counting
+         * semantics are unchanged.
+         */
+        ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
     }
 
     return block_code;
@@ -953,13 +993,9 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
         return NGX_DECLINED;
     }
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
+    ctx = ngx_http_heavybag_get_ctx(r);
     if (ctx == NULL) {
-        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-        if (ctx == NULL) {
-            return NGX_ERROR;
-        }
-        ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+        return NGX_ERROR;
     }
 
     /* resolve the shared counters + this vhost's slot (slot 0 fallback) */
@@ -1006,8 +1042,8 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
     cc16 = (uint16_t) ((verdict.country[0] << 8) | verdict.country[1]);
 
     if (rc != NGX_DECLINED) {
-        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, verdict.reason, rc)
-            == NGX_DECLINED)
+        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, verdict.reason,
+                                                rc, cc16) == NGX_DECLINED)
         {
             return NGX_DECLINED;   /* detect: would-block recorded, allow */
         }
@@ -1023,10 +1059,6 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
                     (void) ngx_atomic_fetch_add(&sh->flag_blocked[k], 1);
                 }
             }
-        }
-
-        if (verdict.geo_valid) {
-            ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
         }
 
         return rc;
@@ -1055,30 +1087,26 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
      * the client, like scanner blocks).
      */
     if (wlcf->method_allow_set && !ngx_http_heavybag_method_allowed(wlcf, r)) {
-        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, HEAVYBAG_REASON_METHOD,
-                                           NGX_HTTP_NOT_FOUND) == NGX_DECLINED)
+        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
+                HEAVYBAG_REASON_METHOD, NGX_HTTP_NOT_FOUND, cc16)
+            == NGX_DECLINED)
         {
             return NGX_DECLINED;
         }
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "heavybag: method \"%V\" not allowed", &r->method_name);
-        if (verdict.geo_valid) {
-            ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-        }
         return NGX_HTTP_NOT_FOUND;
     }
 
     if (wlcf->method_deny_set && ngx_http_heavybag_method_denied(wlcf, r)) {
-        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, HEAVYBAG_REASON_METHOD,
-                                           NGX_HTTP_NOT_FOUND) == NGX_DECLINED)
+        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
+                HEAVYBAG_REASON_METHOD, NGX_HTTP_NOT_FOUND, cc16)
+            == NGX_DECLINED)
         {
             return NGX_DECLINED;
         }
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "heavybag: method \"%V\" denied", &r->method_name);
-        if (verdict.geo_valid) {
-            ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-        }
         return NGX_HTTP_NOT_FOUND;
     }
 
@@ -1087,8 +1115,7 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
      * (for_geo); a NULL rule means no limit applies to this client. The
      * backing zone is on the main conf (HTTP-owned, shared with the stream
      * head). NGX_BUSY -> 429, funnelled through the detect-aware finalizer
-     * like every other block point. The manual cc_bump runs only when the
-     * finalizer actually blocks (enforce), never in detect mode.
+     * like every other block point, which owns the per-country bump too.
      */
     if (wlcf->rate_rules != NULL) {
         rate_rule = ngx_http_heavybag_rate_rule_select(wlcf->rate_rules, &verdict);
@@ -1100,18 +1127,14 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
                == NGX_BUSY)
         {
             if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
-                    HEAVYBAG_REASON_RATE_LIMIT, NGX_HTTP_TOO_MANY_REQUESTS)
-                == NGX_DECLINED)
+                    HEAVYBAG_REASON_RATE_LIMIT, NGX_HTTP_TOO_MANY_REQUESTS,
+                    cc16) == NGX_DECLINED)
             {
                 return NGX_DECLINED;   /* detect: would-block recorded, allow */
             }
 
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                           "heavybag: rate limit exceeded");
-
-            if (verdict.geo_valid) {
-                ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-            }
 
             return NGX_HTTP_TOO_MANY_REQUESTS;
         }
@@ -1134,8 +1157,10 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
      * Descriptive-UA category distribution + spoof rate. Only computed when the
      * status zone is live: the parse + spoof eval are otherwise lazy (run on
      * first $waf_ua_* access), so a deployment using neither the variables nor
-     * waf_status keeps paying nothing here. Counted on every main-request pass,
-     * including each internal-redirect hop, like the other counters above.
+     * waf_status keeps paying nothing here. Counted once per client request:
+     * sh is forced NULL on every internal-redirect hop (see the sh resolution
+     * above), so these bumps are skipped there exactly like every other
+     * sh-gated counter. (observability-02)
      */
     if (sh != NULL) {
         /* spoof_eval runs the descriptive parse itself, setting ctx->ua_category */
@@ -1164,17 +1189,14 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
 
         if (ctx->is_spoofed) {
             if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
-                    HEAVYBAG_REASON_SPOOF, NGX_HTTP_FORBIDDEN) == NGX_DECLINED)
+                    HEAVYBAG_REASON_SPOOF, NGX_HTTP_FORBIDDEN, cc16)
+                == NGX_DECLINED)
             {
                 return NGX_DECLINED;   /* detect: would-block recorded, allow */
             }
 
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                           "heavybag: UA/TLS fingerprint spoof blocked");
-
-            if (verdict.geo_valid) {
-                ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-            }
 
             return NGX_HTTP_FORBIDDEN;
         }
@@ -1186,17 +1208,14 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
         if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
                 (ctx->ua == HEAVYBAG_UA_SCANNER) ? HEAVYBAG_REASON_SCANNER_UA
                                             : HEAVYBAG_REASON_EMPTY_UA,
-                NGX_HTTP_NOT_FOUND) == NGX_DECLINED)
+                NGX_HTTP_NOT_FOUND, cc16) == NGX_DECLINED)
         {
             return NGX_DECLINED;   /* detect: would-block recorded, allow */
         }
 
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                      "heavybag: %V user-agent blocked", &heavybag_type_str[ctx->ua]);
-
-        if (verdict.geo_valid) {
-            ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-        }
+                      "heavybag: %V user-agent blocked",
+                      &ngx_http_heavybag_type_str[ctx->ua]);
 
         return NGX_HTTP_NOT_FOUND;
     }
@@ -1214,27 +1233,24 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
         && wlcf->verified_bot_cidrs[ctx->ua] != NULL
         && ngx_cidr_match(sa, wlcf->verified_bot_cidrs[ctx->ua]) != NGX_OK)
     {
-        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, HEAVYBAG_REASON_FAKE_BOT,
-                                           NGX_HTTP_FORBIDDEN) == NGX_DECLINED)
+        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
+                HEAVYBAG_REASON_FAKE_BOT, NGX_HTTP_FORBIDDEN, cc16)
+            == NGX_DECLINED)
         {
             return NGX_DECLINED;   /* detect: would-block recorded, allow */
         }
 
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "heavybag: fake-bot blocked (%V claimed, IP out of range)",
-                      &heavybag_type_str[ctx->ua]);
-
-        if (verdict.geo_valid) {
-            ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-        }
+                      &ngx_http_heavybag_type_str[ctx->ua]);
 
         return NGX_HTTP_FORBIDDEN;
     }
 
     rc = ngx_http_heavybag_scanner_lookup(wlcf->scanner_re, &r->uri);
     if (rc != NGX_DECLINED) {
-        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, HEAVYBAG_REASON_SCANNER_PATH,
-                                           rc) == NGX_DECLINED)
+        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
+                HEAVYBAG_REASON_SCANNER_PATH, rc, cc16) == NGX_DECLINED)
         {
             return NGX_DECLINED;   /* detect: would-block recorded, allow */
         }
@@ -1261,10 +1277,6 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
             }
         }
 
-        if (verdict.geo_valid) {
-            ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-        }
-
         return rc;
     }
 
@@ -1279,8 +1291,8 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
     rc = ngx_http_heavybag_sig_lookup_decoded(r, wlcf->sig_re[HEAVYBAG_SIG_ARGS],
                                          &r->args);
     if (rc != NGX_DECLINED) {
-        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, HEAVYBAG_REASON_ARGS, rc)
-            == NGX_DECLINED)
+        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
+                HEAVYBAG_REASON_ARGS, rc, cc16) == NGX_DECLINED)
         {
             return NGX_DECLINED;   /* detect: would-block recorded, allow */
         }
@@ -1288,27 +1300,19 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "heavybag: args signature blocked (%i)", rc);
 
-        if (verdict.geo_valid) {
-            ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-        }
-
         return rc;
     }
 
     rc = ngx_http_heavybag_sig_cookie_lookup(r, wlcf->sig_re[HEAVYBAG_SIG_COOKIE]);
     if (rc != NGX_DECLINED) {
-        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, HEAVYBAG_REASON_COOKIE, rc)
-            == NGX_DECLINED)
+        if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
+                HEAVYBAG_REASON_COOKIE, rc, cc16) == NGX_DECLINED)
         {
             return NGX_DECLINED;   /* detect: would-block recorded, allow */
         }
 
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "heavybag: cookie signature blocked (%i)", rc);
-
-        if (verdict.geo_valid) {
-            ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-        }
 
         return rc;
     }
@@ -1317,18 +1321,14 @@ ngx_http_heavybag_preaccess_handler(ngx_http_request_t *r)
         rc = ngx_http_heavybag_sig_lookup_decoded(r, wlcf->sig_re[HEAVYBAG_SIG_REFERER],
                                              &r->headers_in.referer->value);
         if (rc != NGX_DECLINED) {
-            if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf, HEAVYBAG_REASON_REFERER,
-                                               rc) == NGX_DECLINED)
+            if (ngx_http_heavybag_finalize_decision(r, ctx, wlcf,
+                    HEAVYBAG_REASON_REFERER, rc, cc16) == NGX_DECLINED)
             {
                 return NGX_DECLINED;   /* detect: would-block recorded, allow */
             }
 
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                           "heavybag: referer signature blocked (%i)", rc);
-
-            if (verdict.geo_valid) {
-                ngx_http_heavybag_stat_cc_bump(sh, cc16, 1);
-            }
 
             return rc;
         }
@@ -2125,7 +2125,8 @@ ngx_http_heavybag_set_rate_limit(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
  * ctx alloc):
  *   $waf_type    - UA class (regular/crawler/ai-crawler/bot/scanner/empty)
  *   $waf_country - ISO-2 geo country (lazy lookup; one per request via ctx)
- *   $waf_reason  - verdict token from heavybag_reason_str[] ("none" when allowed)
+ *   $waf_reason  - verdict token from ngx_http_heavybag_reason_str[]
+ *                  ("none" when allowed)
  */
 static ngx_int_t
 ngx_http_heavybag_preconfiguration(ngx_conf_t *cf)
@@ -2219,14 +2220,9 @@ ngx_http_heavybag_type_variable(ngx_http_request_t *r, ngx_http_variable_value_t
     ngx_http_heavybag_ctx_t       *ctx;
     ngx_http_heavybag_loc_conf_t  *wlcf;
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
-
+    ctx = ngx_http_heavybag_get_ctx(r);
     if (ctx == NULL) {
-        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-        if (ctx == NULL) {
-            return NGX_ERROR;
-        }
-        ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+        return NGX_ERROR;
     }
 
     if (!ctx->classified) {
@@ -2234,7 +2230,7 @@ ngx_http_heavybag_type_variable(ngx_http_request_t *r, ngx_http_variable_value_t
         ngx_http_heavybag_ua_classify(r, wlcf, ctx);
     }
 
-    s = &heavybag_type_str[ctx->ua];
+    s = &ngx_http_heavybag_type_str[ctx->ua];
 
     v->len = s->len;
     v->data = s->data;
@@ -2247,44 +2243,66 @@ ngx_http_heavybag_type_variable(ngx_http_request_t *r, ngx_http_variable_value_t
 
 
 /*
+ * Lazy fallback geo resolve for the $waf_country / $waf_asn getters on paths
+ * where the preaccess reputation check did not run (or ran without a geo
+ * lookup, e.g. `waf off` or an early allowlist return).
+ *
+ * ONE lookup fills BOTH halves: country and asn come out of the same
+ * ngx_http_heavybag_geo_result_t, so the two getters can no longer each pay for
+ * their own descent. geo_done and asn_done are therefore always set together
+ * -- here and in the preaccess handler -- which is what makes the "at most ONE
+ * geo lookup per request" contract true rather than half-true.
+ */
+static void
+ngx_http_heavybag_resolve_geo_into_ctx(ngx_http_request_t *r,
+    ngx_http_heavybag_ctx_t *ctx, ngx_http_heavybag_loc_conf_t *wlcf)
+{
+    struct sockaddr                 *sa;
+    ngx_http_heavybag_geo_result_t   res;
+
+    if (ctx->geo_done && ctx->asn_done) {
+        return;
+    }
+
+    if (wlcf->rep.geo_db != NULL) {
+        sa = ngx_http_heavybag_client_sa(r, wlcf, ctx);
+        ngx_http_heavybag_geo_lookup(wlcf->rep.geo_db, sa, &res);
+
+        if (res.found) {
+            ctx->country[0] = res.country[0];
+            ctx->country[1] = res.country[1];
+            ctx->asn = res.asn;
+        }
+    }
+
+    /* a lookup was attempted: both halves are resolved (miss -> stay unknown) */
+    ctx->geo_done = 1;
+    ctx->asn_done = 1;
+}
+
+
+/*
  * $waf_country: the geo country (ISO-2) of the request client, or not_found
  * when no geo record exists / geo is not configured. Reuses the ctx geo cache
  * so at most ONE geo lookup happens per request even when the preaccess
- * handler, geo blocking and per-country counters are all active: once
- * geo_done is set the lookup is never repeated.
+ * handler, geo blocking, the per-country counters and $waf_asn are all active:
+ * once geo_done is set the lookup is never repeated.
  */
 static ngx_int_t
 ngx_http_heavybag_country_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
 {
-    struct sockaddr            *sa;
-    ngx_http_heavybag_ctx_t         *ctx;
-    ngx_http_heavybag_loc_conf_t    *wlcf;
-    ngx_http_heavybag_geo_result_t   res;
+    ngx_http_heavybag_ctx_t       *ctx;
+    ngx_http_heavybag_loc_conf_t  *wlcf;
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
+    ctx = ngx_http_heavybag_get_ctx(r);
     if (ctx == NULL) {
-        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-        if (ctx == NULL) {
-            return NGX_ERROR;
-        }
-        ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+        return NGX_ERROR;
     }
 
     if (!ctx->geo_done) {
         wlcf = ngx_http_get_module_loc_conf(r, ngx_http_heavybag_module);
-
-        if (wlcf->rep.geo_db != NULL) {
-            sa = ngx_http_heavybag_client_sa(r, wlcf, ctx);
-            ngx_http_heavybag_geo_lookup(wlcf->rep.geo_db, sa, &res);
-
-            if (res.found) {
-                ctx->country[0] = res.country[0];
-                ctx->country[1] = res.country[1];
-            }
-        }
-
-        ctx->geo_done = 1;
+        ngx_http_heavybag_resolve_geo_into_ctx(r, ctx, wlcf);
     }
 
     /* country[0]==0: no record (or geo disabled) -> the variable is unset */
@@ -2318,16 +2336,12 @@ ngx_http_heavybag_reason_variable(ngx_http_request_t *r,
     ngx_str_t           *s;
     ngx_http_heavybag_ctx_t  *ctx;
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
+    ctx = ngx_http_heavybag_get_ctx(r);
     if (ctx == NULL) {
-        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-        if (ctx == NULL) {
-            return NGX_ERROR;
-        }
-        ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+        return NGX_ERROR;
     }
 
-    s = &heavybag_reason_str[ctx->reason];
+    s = &ngx_http_heavybag_reason_str[ctx->reason];
 
     v->len = s->len;
     v->data = s->data;
@@ -2343,41 +2357,26 @@ ngx_http_heavybag_reason_variable(ngx_http_request_t *r,
  * $waf_asn: the autonomous-system number of the request client (decimal), or
  * not_found when no geo record exists / geo is not configured / asn==0. Reuses
  * the ctx asn cache (filled by the preaccess reputation check) so no extra geo
- * lookup happens on the hot path; falls back to its own lookup on paths where
- * preaccess did not run (e.g. `waf off`).
+ * lookup happens on the hot path; falls back to the SHARED lazy resolve on
+ * paths where preaccess did not run (e.g. `waf off`), which fills the country
+ * half from the same lookup so $waf_country costs nothing extra.
  */
 static ngx_int_t
 ngx_http_heavybag_asn_variable(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
 {
-    u_char                     *p;
-    struct sockaddr            *sa;
-    ngx_http_heavybag_ctx_t         *ctx;
-    ngx_http_heavybag_loc_conf_t    *wlcf;
-    ngx_http_heavybag_geo_result_t   res;
+    u_char                        *p;
+    ngx_http_heavybag_ctx_t       *ctx;
+    ngx_http_heavybag_loc_conf_t  *wlcf;
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
+    ctx = ngx_http_heavybag_get_ctx(r);
     if (ctx == NULL) {
-        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-        if (ctx == NULL) {
-            return NGX_ERROR;
-        }
-        ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+        return NGX_ERROR;
     }
 
     if (!ctx->asn_done) {
         wlcf = ngx_http_get_module_loc_conf(r, ngx_http_heavybag_module);
-
-        if (wlcf->rep.geo_db != NULL) {
-            sa = ngx_http_heavybag_client_sa(r, wlcf, ctx);
-            ngx_http_heavybag_geo_lookup(wlcf->rep.geo_db, sa, &res);
-
-            if (res.found) {
-                ctx->asn = res.asn;
-            }
-        }
-
-        ctx->asn_done = 1;
+        ngx_http_heavybag_resolve_geo_into_ctx(r, ctx, wlcf);
     }
 
     /* asn==0: no record (or geo disabled) -> the variable is unset */
@@ -2482,13 +2481,9 @@ ngx_http_heavybag_ua_ctx_parsed(ngx_http_request_t *r)
     ngx_http_heavybag_ctx_t       *ctx;
     ngx_http_heavybag_loc_conf_t  *wlcf;
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
+    ctx = ngx_http_heavybag_get_ctx(r);
     if (ctx == NULL) {
-        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-        if (ctx == NULL) {
-            return NULL;
-        }
-        ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+        return NULL;
     }
 
     if (!ctx->ua_parsed) {
@@ -2609,13 +2604,9 @@ ngx_http_heavybag_ua_spoofed_variable(ngx_http_request_t *r,
     ngx_http_heavybag_ctx_t       *ctx;
     ngx_http_heavybag_loc_conf_t  *wlcf;
 
-    ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
+    ctx = ngx_http_heavybag_get_ctx(r);
     if (ctx == NULL) {
-        ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-        if (ctx == NULL) {
-            return NGX_ERROR;
-        }
-        ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+        return NGX_ERROR;
     }
 
     if (!ctx->spoof_evaluated) {
@@ -3078,7 +3069,7 @@ ngx_http_heavybag_reason_header_filter(ngx_http_request_t *r)
     h->hash = 1;
     h->next = NULL;
     ngx_str_set(&h->key, "X-WAF-Reason");
-    h->value = heavybag_reason_str[reason];
+    h->value = ngx_http_heavybag_reason_str[reason];
 
     return ngx_http_heavybag_next_reason_filter(r);
 }

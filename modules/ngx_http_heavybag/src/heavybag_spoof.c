@@ -16,8 +16,8 @@
 #include "heavybag_spoof.h"
 
 
-static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
-static ngx_http_output_body_filter_pt    ngx_http_next_body_filter;
+static ngx_http_output_header_filter_pt  ngx_http_heavybag_next_header_filter;
+static ngx_http_output_body_filter_pt    ngx_http_heavybag_next_body_filter;
 
 
 /* Apache reason phrase + descriptive paragraph per status. */
@@ -197,7 +197,7 @@ ngx_http_heavybag_spoof_header_filter(ngx_http_request_t *r)
     wlcf = ngx_http_get_module_loc_conf(r, ngx_http_heavybag_module);
 
     if (wlcf->server_token.len == 0) {
-        return ngx_http_next_header_filter(r);
+        return ngx_http_heavybag_next_header_filter(r);
     }
 
     /* 1. Server header override -- every response. */
@@ -232,14 +232,11 @@ ngx_http_heavybag_spoof_header_filter(ngx_http_request_t *r)
                            (u_char *) "text/html", sizeof("text/html") - 1)
            == 0)
     {
-        ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
-
+        /* the shared fetch-or-alloc returns NULL on alloc failure; the filter
+         * contract is NGX_ERROR, so map it here rather than in the helper */
+        ctx = ngx_http_heavybag_get_ctx(r);
         if (ctx == NULL) {
-            ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_heavybag_ctx_t));
-            if (ctx == NULL) {
-                return NGX_ERROR;
-            }
-            ngx_http_set_ctx(r, ctx, ngx_http_heavybag_module);
+            return NGX_ERROR;
         }
 
         if (ngx_http_heavybag_build_error_page(r, &wlcf->server_token,
@@ -255,7 +252,7 @@ ngx_http_heavybag_spoof_header_filter(ngx_http_request_t *r)
         r->headers_out.content_length_n = ctx->spoof_body.len;
     }
 
-    return ngx_http_next_header_filter(r);
+    return ngx_http_heavybag_next_header_filter(r);
 }
 
 
@@ -274,7 +271,7 @@ ngx_http_heavybag_spoof_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
     ctx = ngx_http_get_module_ctx(r, ngx_http_heavybag_module);
 
     if (ctx == NULL || !ctx->spoof_swap) {
-        return ngx_http_next_body_filter(r, in);
+        return ngx_http_heavybag_next_body_filter(r, in);
     }
 
     if (ctx->spoof_done) {
@@ -298,17 +295,17 @@ ngx_http_heavybag_spoof_body_filter(ngx_http_request_t *r, ngx_chain_t *in)
 
     ctx->spoof_done = 1;
 
-    return ngx_http_next_body_filter(r, &out);
+    return ngx_http_heavybag_next_body_filter(r, &out);
 }
 
 
 ngx_int_t
 ngx_http_heavybag_spoof_init(ngx_conf_t *cf)
 {
-    ngx_http_next_header_filter = ngx_http_top_header_filter;
+    ngx_http_heavybag_next_header_filter = ngx_http_top_header_filter;
     ngx_http_top_header_filter = ngx_http_heavybag_spoof_header_filter;
 
-    ngx_http_next_body_filter = ngx_http_top_body_filter;
+    ngx_http_heavybag_next_body_filter = ngx_http_top_body_filter;
     ngx_http_top_body_filter = ngx_http_heavybag_spoof_body_filter;
 
     return NGX_OK;

@@ -210,6 +210,16 @@ typedef struct {
 
 
 /*
+ * Fetch the per-request heavybag ctx, allocating (ngx_pcalloc -- every lazy
+ * guard starts unset) and attaching it on first touch. NULL only on pool
+ * allocation failure. The single fetch-or-alloc idiom for both HTTP phase
+ * handlers, the variable getters and the spoof filter.
+ * Defined in ngx_http_heavybag_module.c.
+ */
+ngx_http_heavybag_ctx_t *ngx_http_heavybag_get_ctx(ngx_http_request_t *r);
+
+
+/*
  * Fetch the per-connection JA4 fingerprint (computed by the ClientHello callback
  * at TLS handshake and stashed on the SSL connection ex-data) into *ja4, or
  * leave *ja4 len 0 on plain HTTP / before the ex-index exists. Connection-scoped

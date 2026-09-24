@@ -185,8 +185,8 @@ ngx_int_t ngx_http_heavybag_status_handler(ngx_http_request_t *r);
  * enum -> token string tables, defined in ngx_http_heavybag_module.c and consumed
  * by the serializers ($waf_type / $waf_reason tokens; reused as metric labels).
  */
-extern ngx_str_t  heavybag_type_str[HEAVYBAG_UA_MAX];
-extern ngx_str_t  heavybag_reason_str[HEAVYBAG_REASON_MAX];
+extern ngx_str_t  ngx_http_heavybag_type_str[HEAVYBAG_UA_MAX];
+extern ngx_str_t  ngx_http_heavybag_reason_str[HEAVYBAG_REASON_MAX];
 
 #endif /* HEAVYBAG_STAT_CC_UNIT_TEST */
 
