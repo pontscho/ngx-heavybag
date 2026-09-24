@@ -52,6 +52,10 @@ cleanup() {
     "$NGINX" -p "$SBX/" -c "$RCONF" -s stop 2>/dev/null || true
     [ -f "$SPID" ] && kill "$(cat "$SPID")" 2>/dev/null || true
     [ -f "$RPID" ] && kill "$(cat "$RPID")" 2>/dev/null || true
+    # C3's extra-vhost fragment must never survive a crashed run: the reload
+    # conf includes it by glob, so a leftover would silently change C2's vhost
+    # count on the next invocation.
+    rm -f "$HB_RENDER_DIR"/rt-extra-*.conf
 }
 trap cleanup EXIT
 
@@ -174,6 +178,134 @@ badlog=$(logclean "$RLOG")
     || bad "C2 reload error log concerning:" "$badlog"
 
 "$NGINX" -p "$SBX/" -c "$RCONF" -s stop 2>/dev/null; sleep 1
+
+# ============================================================================
+# C3 - vhost COUNT change across reload (stat-reload-01, code-review #1)
+# ============================================================================
+# C2 above proves the happy path: same vhost count -> segment reused, counters
+# persist. C3 is the divergent path. The status zone is page-aligned with 4
+# slack pages, so going from 2 to 4 server{} blocks leaves shm.size IDENTICAL
+# and nginx hands the old segment to the init callback -- while the trailing
+# per-vhost array is still sized for 2. Pre-fix the segment kept nvhosts=2
+# forever: the two new vhosts were invisible in /waf/status (the render clamp
+# hides them) and every bump aimed at slot 2/3 was silently dropped, while the
+# renderer's own bound came from the config, i.e. the OOB read SV1 describes.
+#
+# The fix reconciles on reload: mismatch -> re-slab with the new trailing-array
+# size, zero the counters, log a NOTICE. Asserted here: the NOTICE fires with
+# the real old->new counts, the counters really are reset (not carried over and
+# misattributed), the new vhosts show up with ZERO counters, and all three
+# status formats stay well-formed. Shrinking back (4 -> 2) is asserted too.
+#
+# NOTE: there is no ASan-instrumented nginx build in this project (ASan is wired
+# only into the standalone unit binaries in tests/unit/run-unit-tests.sh), so
+# this is a FUNCTIONAL assertion, not a sanitizer one. The memory-safety half of
+# the finding is covered by the render-side clamp + its unit test in the status
+# suite; this case pins the root-cause reconciliation.
+echo
+echo "================  C3: vhost count change on reload (stat-reload-01)  ================"
+FRAG=$HB_RENDER_DIR/rt-extra-vhosts.conf
+rm -f "$HB_RENDER_DIR"/rt-extra-*.conf
+: > "$RLOG" 2>/dev/null || true
+
+nvhost_rows() { curl -s "$STAT" | grep -c '^vhost '; }
+
+if "$NGINX" -p "$SBX/" -c "$RCONF"; then
+    sleep 1
+    M0=$(cat "$RPID" 2>/dev/null)
+    n0=$(nvhost_rows)
+    [ "$n0" = 2 ] && ok "C3 base config renders 2 vhost rows" \
+        || bad "C3 base vhost rows = $n0 (want 2)"
+
+    # warm the counters so a reset is unambiguously visible
+    for i in 1 2 3 4 5; do curl -s -o /dev/null "http://127.0.0.1:28612/index.html"; done
+    R0=$(cval http_requests_total)
+    [ -n "$R0" ] && [ "$R0" -gt 0 ] && ok "C3 pre-reload counters warmed (http_requests_total=$R0)" \
+        || bad "C3 could not warm counters (http_requests_total=$R0)"
+
+    # --- grow: 2 -> 4 server{} blocks ---------------------------------------
+    cat > "$FRAG" <<'EOF'
+    server {
+        listen       127.0.0.1:28614;
+        server_name  rt-extra-a;
+        waf          on;
+    }
+    server {
+        listen       127.0.0.1:28615;
+        server_name  rt-extra-b;
+        waf          on;
+    }
+EOF
+    "$NGINX" -p "$SBX/" -c "$RCONF" -s reload 2>>"$RLOG" && sleep 1.5 \
+        || bad "C3 grow reload command failed"
+
+    M1=$(cat "$RPID" 2>/dev/null)
+    [ -n "$M1" ] && [ "$M1" = "$M0" ] && kill -0 "$M1" 2>/dev/null \
+        && ok "C3 master survived the vhost-count reload (pid $M1)" \
+        || bad "C3 master died/changed on vhost-count reload: $M0 -> $M1"
+
+    grep -aqF 'vhost count changed (2 -> 4), counters reset' "$RLOG" \
+        && ok "C3 NOTICE logged: vhost count changed (2 -> 4), counters reset" \
+        || bad "C3 reconciliation NOTICE missing" "$(grep -a 'heavybag:' "$RLOG" | tail -5)"
+
+    # counters really reset -- the status vhost runs `waf off`, so scraping does
+    # not self-count and the honest post-reset value is exactly 0.
+    R1=$(cval http_requests_total)
+    [ "$R1" = 0 ] && ok "C3 counters reset on vhost-count change ($R0 -> 0, no fabricated history)" \
+        || bad "C3 counters not reset: http_requests_total=$R1 (want 0, was $R0)"
+
+    n1=$(nvhost_rows)
+    [ "$n1" = 4 ] && ok "C3 all 4 vhosts rendered after grow" \
+        || bad "C3 vhost rows after grow = $n1 (want 4 -- new slots still invisible?)"
+
+    curl -s "$STAT" | grep -q '^vhost "rt-extra-a" requests=0 allowed=0' \
+        && ok "C3 new vhost rt-extra-a present with zero counters" \
+        || bad "C3 rt-extra-a row missing/non-zero" "$(curl -s "$STAT" | grep '^vhost ')"
+    curl -s "$STAT" | grep -q '^vhost "rt-extra-b" requests=0 allowed=0' \
+        && ok "C3 new vhost rt-extra-b present with zero counters" \
+        || bad "C3 rt-extra-b row missing/non-zero" "$(curl -s "$STAT" | grep '^vhost ')"
+
+    # the resized segment must stay renderable in ALL THREE formats
+    curl -s "http://127.0.0.1:28611/waf/stat/json" | jq -e . >/dev/null 2>&1 \
+        && ok "C3 json format parses after resize" || bad "C3 json broken after resize"
+    jn=$(curl -s "http://127.0.0.1:28611/waf/stat/json" | jq -r '.vhosts | length' 2>/dev/null)
+    [ "$jn" = 4 ] && ok "C3 json lists 4 vhosts" || bad "C3 json vhost count = $jn (want 4)"
+    curl -s "http://127.0.0.1:28611/waf/stat/prometheus" | grep -q '^heavybag_http_requests_total ' \
+        && ok "C3 prometheus format intact after resize" || bad "C3 prometheus broken after resize"
+
+    # the new vhosts must actually COUNT now (the slots exist, not just render)
+    curl -s -o /dev/null "http://127.0.0.1:28614/"
+    sleep 0.5
+    curl -s "$STAT" | grep -q '^vhost "rt-extra-a" requests=1' \
+        && ok "C3 new vhost slot is live (rt-extra-a requests=1)" \
+        || bad "C3 new vhost slot not counting" "$(curl -s "$STAT" | grep '^vhost ')"
+
+    # --- shrink: 4 -> 2 server{} blocks -------------------------------------
+    rm -f "$FRAG"
+    "$NGINX" -p "$SBX/" -c "$RCONF" -s reload 2>>"$RLOG" && sleep 1.5 \
+        || bad "C3 shrink reload command failed"
+
+    grep -aqF 'vhost count changed (4 -> 2), counters reset' "$RLOG" \
+        && ok "C3 NOTICE logged on shrink: vhost count changed (4 -> 2)" \
+        || bad "C3 shrink NOTICE missing" "$(grep -a 'heavybag:' "$RLOG" | tail -5)"
+
+    n2=$(nvhost_rows)
+    [ "$n2" = 2 ] && ok "C3 back to 2 vhost rows after shrink" \
+        || bad "C3 vhost rows after shrink = $n2 (want 2)"
+
+    live=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:28612/index.html")
+    [ "$live" = "200" ] && ok "C3 worker still serving after both resizes (/index.html -> 200)" \
+        || bad "C3 worker not serving after resize reloads (/index.html -> $live)"
+
+    badlog=$(logclean "$RLOG")
+    [ -z "$badlog" ] && ok "C3 error log clean across both resize reloads" \
+        || bad "C3 resize error log concerning:" "$badlog"
+
+    "$NGINX" -p "$SBX/" -c "$RCONF" -s stop 2>/dev/null; sleep 1
+else
+    bad "C3 base config failed to start" "$(tail -4 "$RLOG")"
+fi
+rm -f "$HB_RENDER_DIR"/rt-extra-*.conf
 
 echo
 echo "==================  RESULT: $pass passed, $fail failed  =================="

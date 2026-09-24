@@ -2672,6 +2672,7 @@ static ngx_int_t
 ngx_http_heavybag_stat_init_zone(ngx_shm_zone_t *shm_zone, void *data)
 {
     size_t                     size;
+    ngx_uint_t                 onvhosts;
     ngx_slab_pool_t           *shpool;
     ngx_http_heavybag_stat_shm_t   *sh;
     ngx_http_heavybag_stat_shm_t   *osh = data;
@@ -2688,8 +2689,88 @@ ngx_http_heavybag_stat_init_zone(ngx_shm_zone_t *shm_zone, void *data)
                           "a full restart is required for waf_status");
             return NGX_ERROR;
         }
-        osh->last_reload_time = ngx_time();
-        shm_zone->data = osh;
+
+        /* zone->data still holds THIS cycle's main conf (set at add time), so
+         * the reload arm can compare the new vhost count against the segment's
+         * own (stat-reload-01) */
+        wmcf = shm_zone->data;
+
+        if (osh->nvhosts == wmcf->nvhosts) {
+            osh->last_reload_time = ngx_time();
+            shm_zone->data = osh;
+            return NGX_OK;
+        }
+
+        /*
+         * The vhost count changed across the reload while nginx still matched
+         * (and handed us) the old segment -- the zone size is page-aligned with
+         * 4 slack pages, so adding or dropping a handful of server{} blocks
+         * leaves shm.size identical and core reuses the segment. The trailing
+         * per-vhost array is then the WRONG length for this cycle. The hot path
+         * bounds-checks against the segment's own nvhosts, so it degrades to
+         * silently DROPPING every bump aimed at a slot the old segment never
+         * had -- added vhosts stay permanently at zero. The renderer sized its
+         * loop from the CONFIG count instead and read past the array end; that
+         * is the CWE-125 half (#1 / SV1), now independently clamped in
+         * heavybag_status.c. Either way the numbers are wrong: slot k is a
+         * different server{} than it was before the reload.
+         *
+         * Re-initialize the segment in place with the new trailing-array size
+         * and reset every counter, loudly. Silently re-mapping the old slots
+         * onto the new indices would FABRICATE history: slot k in the new cycle
+         * is a different server{} than slot k was before, so the carried-over
+         * numbers would be attributed to the wrong vhost. An honest, announced
+         * reset is the only truthful option.
+         *
+         * Known limitation (deliberate): an EQUAL-count reload that merely
+         * REORDERS server{} blocks is indistinguishable here and keeps slot
+         * identity by index, so per-vhost counters follow the index, not the
+         * server_name. Full server_name fingerprinting of the segment is out of
+         * scope for this fix.
+         *
+         * Ordering note: the pool holds exactly this one allocation, so freeing
+         * first guarantees the (equal-or-larger) re-allocation fits -- the zone
+         * was sized from the NEW nvhosts in stat_add_zone. Old-cycle workers may
+         * still bump counters through their inherited pointer until they exit;
+         * those late bumps land in the reset segment at their old indices. That
+         * is accounting noise bounded by the shutdown window, not corruption:
+         * nothing else is ever allocated from this pool.
+         */
+        onvhosts = osh->nvhosts;
+
+        size = sizeof(ngx_http_heavybag_stat_shm_t)
+               + wmcf->nvhosts * sizeof(ngx_http_heavybag_stat_vhost_t);
+
+        ngx_slab_free(shpool, osh);
+
+        sh = ngx_slab_alloc(shpool, size);
+        if (sh == NULL) {
+            /* osh is already freed, so leaving shpool->data pointing at it
+             * would hand a dangling pointer to any later re-attach. The reload
+             * fails here and the old cycle keeps serving, but the pool must not
+             * advertise a freed block. */
+            shpool->data = NULL;
+            ngx_log_error(NGX_LOG_EMERG, shm_zone->shm.log, 0,
+                          "heavybag: cannot re-allocate the status zone for "
+                          "%ui vhosts", wmcf->nvhosts);
+            return NGX_ERROR;
+        }
+
+        ngx_memzero(sh, size);
+        sh->layout = HEAVYBAG_STAT_SHM_LAYOUT;
+        /* the counters restart from zero, so the "since" stamp must too --
+         * otherwise every rate derived from start_time reads low */
+        sh->start_time = ngx_time();
+        sh->last_reload_time = sh->start_time;
+        sh->nvhosts = wmcf->nvhosts;
+
+        shpool->data = sh;
+        shm_zone->data = sh;
+
+        ngx_log_error(NGX_LOG_NOTICE, shm_zone->shm.log, 0,
+                      "heavybag: vhost count changed (%ui -> %ui), "
+                      "counters reset", onvhosts, wmcf->nvhosts);
+
         return NGX_OK;
     }
 

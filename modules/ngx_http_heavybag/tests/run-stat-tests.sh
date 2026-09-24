@@ -334,6 +334,30 @@ sleep 1
 a=$(getcnt stream_denied_rate_limit)
 [ $((a - b)) -ge 1 ] && ok "stream rate limit denies over-budget connections (+$((a-b)))" || bad "stream rate: want >=1 got +$((a-b))"
 
+# T7.b (#3 / SV9, CWE-284): an ALLOWLISTED peer must skip the L4 rate stage --
+# "trusted == trusted", the same full-scope bypass the HTTP and mail heads apply.
+# 29095 = waf_allowlist 127.0.0.1/32 + waf_stream_rate_limit burst=1 on the SAME
+# shared per-IP bucket the block above just drained.
+# Control FIRST so the bypass assertion can never pass vacuously: re-drain 29093
+# and require it to still deny. Only then is "29095 allowed" evidence of the
+# bypass rather than evidence of a refilled bucket.
+b=$(getcnt stream_denied_rate_limit)
+for i in 1 2 3 4; do curl -s --max-time 2 -o /dev/null "http://127.0.0.1:29093/" 2>/dev/null; done
+sleep 1
+a=$(getcnt stream_denied_rate_limit)
+[ $((a - b)) -ge 1 ] \
+    && ok "stream allowlist control: non-allowlisted peer still denied on the drained bucket (+$((a-b)))" \
+    || bad "stream allowlist control: bucket not drained (+$((a-b)), want >=1) -- bypass test would be vacuous"
+
+b_allow=$(getcnt stream_allowed)
+b_deny=$(getcnt stream_denied_rate_limit)
+for i in 1 2 3; do curl -s --max-time 2 -o /dev/null "http://127.0.0.1:29095/" 2>/dev/null; done
+sleep 1
+a_allow=$(getcnt stream_allowed)
+a_deny=$(getcnt stream_denied_rate_limit)
+assert_delta "stream allowlisted peer over-limit is ALLOWED (rate stage skipped)" "$b_allow" "$a_allow" 3
+assert_delta "stream allowlisted peer bumps no rate denial" "$b_deny" "$a_deny" 0
+
 # L4 detect double-would_block (documented-as-intended): ONE connection that
 # trips BOTH reputation AND rate in detect lands in TWO DISTINCT would_block
 # reason slots -- blocklist + rate_limit -- each bumped ONCE, NOT the same slot
