@@ -105,6 +105,120 @@ ngx_http_heavybag_geo_u16(const u_char *p)
 
 
 /*
+ * Width-independent block-table bounds test: is [off, off+len) outside a file
+ * of `size` bytes? The natural `(size_t) off + len > size` WRAPS on an ILP32
+ * build -- there size_t is 32-bit, and off/len are untrusted 32-bit header
+ * fields, so e.g. off=0xfffffff0 + len=0x20 folds to 0x10 and passes, after
+ * which db->block[i] points far outside the mapping. Subtracting instead of
+ * adding cannot overflow at any width: the first test guarantees `size - off`
+ * does not underflow. Same ILP32 hardening rationale as the ASN parser in
+ * heavybag_reputation.c (M2); LP64 was already safe. (SV4, CWE-190 -> 125)
+ */
+static ngx_inline ngx_uint_t
+ngx_http_heavybag_geo_block_oob(uint32_t off, uint32_t len, size_t size)
+{
+    return (off > size || len > size - off);
+}
+
+
+/*
+ * Width-independent entry-index bounds test, the node/leaf counterpart of
+ * geo_block_oob above: is 12-byte entry `idx` outside a block of `len` bytes?
+ *
+ * The natural `(size_t) idx * 12 + 12 > len` WRAPS on an ILP32 build -- there
+ * size_t is 32-bit and idx is an untrusted 32-bit index straight out of the
+ * DB, so the product alone folds over. The two live vectors:
+ *   idx = 0x7fffffff (the largest value the leaf path can carry, since the
+ *     0x80000000 bit is the internal-node marker): 0x7fffffff*12 + 12 folds to
+ *     EXACTLY 0, so the pre-fix bound accepted it for ANY len, then indexed
+ *     block + 0xfffffff4;
+ *   idx = 357913941: folds to 8, likewise accepted.
+ * Dividing instead of multiplying cannot overflow at any width: len/12 is the
+ * number of whole entries that fit, and `12*idx + 12 <= len` is exactly
+ * `idx < len/12` for integer division (0 <= len%12 < 12 leaves no room for a
+ * partial entry). Callers MUST test before forming the offset -- a passing idx
+ * satisfies idx*12 < len <= UINT32_MAX, which makes the subsequent multiply
+ * unwrappable at any width.
+ *
+ * Same hardening class the block table already got, now closed for the three
+ * node/leaf index sites (descent, walker, leaf decode). LP64 was already safe.
+ * (SV4, CWE-190 -> 125)
+ */
+#define NGX_HTTP_HEAVYBAG_GEO_ENTRY  12   /* tree node AND network leaf size */
+
+static ngx_inline ngx_uint_t
+ngx_http_heavybag_geo_entry_oob(uint32_t idx, uint32_t len)
+{
+    return (idx >= len / NGX_HTTP_HEAVYBAG_GEO_ENTRY);
+}
+
+
+/*
+ * Result of the IPv4-mapped-root descent. Dedicated codes rather than
+ * NGX_OK/NGX_ERROR: those are nginx-only, and this descent is compiled into
+ * the nginx-free unit-test build too. The caller owns the log wording.
+ */
+#define NGX_HTTP_HEAVYBAG_GEO_V4ROOT_OK       0
+#define NGX_HTTP_HEAVYBAG_GEO_V4ROOT_TRUNC    1  /* node outside the NT block */
+#define NGX_HTTP_HEAVYBAG_GEO_V4ROOT_DEADEND  2  /* zero child in the /96 chain */
+
+
+/*
+ * Descend the network tree to the IPv4-mapped root (::ffff:0:0/96): 96 steps,
+ * the first 80 following the bit==0 child (the leading zeroes), the last 16
+ * the bit==1 child (the 0xffff marker). Kept pure over the tree block so the
+ * unit harness can drive it without nginx; *root is written only on OK.
+ *
+ * A fetched child of 0 is the trie's terminal sentinel -- node 0 is the root
+ * and nothing points back to it, which is exactly why the runtime walker ends
+ * on it (`} while (nxt)`, see _walk below). ANY zero along the chain, the 96th
+ * step included, is therefore a hard load failure:
+ *
+ *   - a zero BEFORE the last step means the /96 chain is absent or short:
+ *     `nxt` re-reads node 0 (always in bounds, so the bounds check never
+ *     fires) and the descent silently keeps going from the v6 root;
+ *   - a zero AT the last step walks the chain in full but names node 0 -- the
+ *     v6 root, which by construction sits at depth 0 -- as the IPv4 root.
+ *
+ * Both land in the same wrong place: db->ipv4root then points at a node that
+ * is not the ::ffff:0:0/96 subtree, so every IPv4 lookup walks the v6 trie
+ * from the top and silently returns another network's country/ASN. In a
+ * well-formed DB index 0 is depth 0 and can never legitimately be the IPv4
+ * root, so rejecting it costs an intact database nothing. The ECDSA gate
+ * proves the file's integrity, not its trie structure, so this fails closed
+ * at config time, never a silent fallback. (#8 / SV3)
+ */
+static ngx_int_t
+ngx_http_heavybag_geo_ipv4root(const u_char *nt, uint32_t ntlen, uint32_t *root)
+{
+    uint32_t    nxt;
+    size_t      off;
+    ngx_uint_t  i;
+
+    nxt = 0;
+
+    for (i = 0; i < 96; i++) {
+        /* bounds BEFORE the multiply, so the offset cannot wrap on ILP32 */
+        if (ngx_http_heavybag_geo_entry_oob(nxt, ntlen)) {
+            return NGX_HTTP_HEAVYBAG_GEO_V4ROOT_TRUNC;
+        }
+
+        off = (size_t) nxt * NGX_HTTP_HEAVYBAG_GEO_ENTRY;
+
+        nxt = ngx_http_heavybag_geo_u32(nt + off + (i < 80 ? 0 : 4));
+
+        if (nxt == 0) {
+            return NGX_HTTP_HEAVYBAG_GEO_V4ROOT_DEADEND;
+        }
+    }
+
+    *root = nxt;
+
+    return NGX_HTTP_HEAVYBAG_GEO_V4ROOT_OK;
+}
+
+
+/*
  * Verify the database's embedded ECDSA P-521 / SHA-512 signature against the
  * pinned IPFire public key -- libloc loc_database_verify() reproduced with
  * OpenSSL (libcrypto is already linked, see heavybag_ja4.c; no libloc dependency).
@@ -267,8 +381,8 @@ ngx_http_heavybag_geo_db_t *
 ngx_http_heavybag_geo_open(ngx_conf_t *cf, ngx_str_t *path)
 {
     u_char                  *base, *hdr;
-    size_t                   size;
-    uint32_t                 off, len, nxt;
+    size_t                   size, nsize;
+    uint32_t                 off, len;
     ngx_fd_t                 fd;
     ngx_str_t                full;
     ngx_uint_t               i;
@@ -319,15 +433,62 @@ ngx_http_heavybag_geo_open(ngx_conf_t *cf, ngx_str_t *path)
         return NULL;
     }
 
+    /*
+     * OPERATIONAL CONTRACT -- location.db MUST be replaced with write-new +
+     * rename(2), NEVER truncated or rewritten in place.
+     *
+     * mmap does not pin the file's length: it maps pages of the inode, and if
+     * that inode is shortened while the mapping is live, every touch past the
+     * new EOF raises SIGBUS -- in a worker, mid-request, on a read that looks
+     * like a plain pointer dereference (_walk/_lookup below). rename(2) does
+     * not have that problem: it only swaps the directory entry, the old inode
+     * stays alive and fully sized for as long as this mapping references it,
+     * so live workers keep serving the old DB until the next reload re-maps.
+     * Forbidden update patterns: `> location.db`, `curl -o` / `wget -O` onto
+     * the live path, `cp` over it, rsync without --inplace being avoided.
+     *
+     * The re-stat below closes ONLY the load-time race (the file changing
+     * between the ngx_fd_info above and this mmap). Truncation AFTER a
+     * successful load stays fatal BY DESIGN -- the same trade-off nginx makes
+     * for its own mmap'd output/cache files. A SIGBUS handler is deliberately
+     * not installed: it could not make a half-mapped DB coherent, only hide
+     * the operator error behind an unrecoverable-in-practice signal. (#10/SV5)
+     */
     base = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
-
-    ngx_close_file(fd);
 
     if (base == MAP_FAILED) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
                            "mmap(\"%V\", %uz) failed", &full, size);
+        ngx_close_file(fd);
         return NULL;
     }
+
+    /*
+     * Load-time belt: if the size moved under us, `size` describes a file that
+     * no longer exists and the tail of the mapping is already SIGBUS-live.
+     * Reject now, while we can still fail the configuration cleanly.
+     */
+    if (ngx_fd_info(fd, &fi) == NGX_FILE_ERROR) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, ngx_errno,
+                           ngx_fd_info_n " \"%V\" failed after mmap", &full);
+        munmap(base, size);
+        ngx_close_file(fd);
+        return NULL;
+    }
+
+    nsize = (size_t) ngx_file_size(&fi);
+
+    if (nsize != size) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "geo database \"%V\" changed size while loading (%uz -> %uz "
+            "bytes); it must be replaced with write-new + rename(2), never "
+            "truncated or rewritten in place", &full, size, nsize);
+        munmap(base, size);
+        ngx_close_file(fd);
+        return NULL;
+    }
+
+    ngx_close_file(fd);
 
     db = ngx_pcalloc(cf->pool, sizeof(ngx_http_heavybag_geo_db_t));
     if (db == NULL) {
@@ -372,7 +533,7 @@ ngx_http_heavybag_geo_open(ngx_conf_t *cf, ngx_str_t *path)
         off = ngx_http_heavybag_geo_u32(hdr + 20 + i * 8);
         len = ngx_http_heavybag_geo_u32(hdr + 24 + i * 8);
 
-        if ((size_t) off + len > size) {
+        if (ngx_http_heavybag_geo_block_oob(off, len, size)) {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                 "geo database \"%V\" block %ui out of bounds", &full, i);
             return NULL;
@@ -383,23 +544,31 @@ ngx_http_heavybag_geo_open(ngx_conf_t *cf, ngx_str_t *path)
     }
 
     /* Descend the v6 trie to the IPv4-mapped root (::ffff:0:0/96). */
-    nxt = 0;
-    for (i = 0; i < 96; i++) {
-        size_t  off = (size_t) nxt * 12;
+    switch (ngx_http_heavybag_geo_ipv4root(
+                db->block[NGX_HTTP_HEAVYBAG_GEO_NT],
+                db->block_len[NGX_HTTP_HEAVYBAG_GEO_NT],
+                &db->ipv4root))
+    {
+    case NGX_HTTP_HEAVYBAG_GEO_V4ROOT_OK:
+        break;
 
-        if (off + 12 > db->block_len[NGX_HTTP_HEAVYBAG_GEO_NT]) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                "geo database \"%V\" truncated network tree", &full);
-            return NULL;
-        }
-        nxt = ngx_http_heavybag_geo_u32(db->block[NGX_HTTP_HEAVYBAG_GEO_NT]
-                                   + off + (i < 80 ? 0 : 4));
+    case NGX_HTTP_HEAVYBAG_GEO_V4ROOT_DEADEND:
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "geo database \"%V\" network tree does not reach the IPv4-mapped "
+            "root: the ::ffff:0:0/96 chain has a zero child (node 0 is the "
+            "depth-0 v6 root and is never a valid IPv4 root)", &full);
+        return NULL;
+
+    default:
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "geo database \"%V\" truncated network tree", &full);
+        return NULL;
     }
-    db->ipv4root = nxt;
 
     ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0,
         "heavybag: geo database \"%V\" loaded (%uz bytes, %ui networks)",
-        &full, size, db->block_len[NGX_HTTP_HEAVYBAG_GEO_ND] / 12);
+        &full, size, db->block_len[NGX_HTTP_HEAVYBAG_GEO_ND]
+                     / NGX_HTTP_HEAVYBAG_GEO_ENTRY);
 
     return db;
 }
@@ -421,14 +590,16 @@ ngx_http_heavybag_geo_walk(ngx_http_heavybag_geo_db_t *db, const u_char *addr,
 
     do {
         /*
-         * Offset in size_t so the index cannot wrap (nxt is an untrusted
-         * 32-bit value from the DB), and require the whole 12-byte node to
-         * fit -- guarding only its first byte over-reads a trailing node.
+         * Require the WHOLE 12-byte node to fit -- guarding only its first
+         * byte over-reads a trailing node -- and test the index before it is
+         * multiplied out, since nxt is an untrusted 32-bit value from the DB
+         * and `(size_t) nxt * 12` wraps on an ILP32 size_t.
          */
-        off = (size_t) nxt * 12;
-        if (off + 12 > ntlen) {
+        if (ngx_http_heavybag_geo_entry_oob(nxt, ntlen)) {
             return -1;
         }
+
+        off = (size_t) nxt * NGX_HTTP_HEAVYBAG_GEO_ENTRY;
 
         net = ngx_http_heavybag_geo_u32(nt + off + 8);
         if (!(net & 0x80000000)) {
@@ -487,8 +658,16 @@ ngx_http_heavybag_geo_lookup(ngx_http_heavybag_geo_db_t *db, struct sockaddr *sa
         return;
     }
 
+    /*
+     * net < 0 is the walker's no-match; past that the walker guarantees the
+     * 0x80000000 marker bit is clear, so net <= 0x7fffffff and the cast to
+     * uint32_t is exact. The bound is taken on the INDEX (see
+     * geo_entry_oob) -- 0x7fffffff * 12 + 12 folds to exactly 0 on an ILP32
+     * size_t, which the old additive form accepted for any block length.
+     */
     if (net < 0
-        || (size_t) net * 12 + 12 > db->block_len[NGX_HTTP_HEAVYBAG_GEO_ND])
+        || ngx_http_heavybag_geo_entry_oob((uint32_t) net,
+               db->block_len[NGX_HTTP_HEAVYBAG_GEO_ND]))
     {
         return;
     }
@@ -501,7 +680,8 @@ ngx_http_heavybag_geo_lookup(ngx_http_heavybag_geo_db_t *db, struct sockaddr *sa
      * nanolibloc reads cc and asn but skips flags; the flags are at
      * offset 8, NOT right after the country code.
      */
-    p = db->block[NGX_HTTP_HEAVYBAG_GEO_ND] + (size_t) net * 12;
+    p = db->block[NGX_HTTP_HEAVYBAG_GEO_ND]
+        + (size_t) net * NGX_HTTP_HEAVYBAG_GEO_ENTRY;
 
     res->country[0] = p[0];
     res->country[1] = p[1];

@@ -300,7 +300,7 @@ variable, independent of `waf` / `waf_bot_block`.
 | `waf_ja4_list` | `<path>` | — | Load the JA4-fingerprint → coarse-TLS-family table (`<ja4> <family>` per line; family ∈ `chromium`/`firefox`/`safari`/`tool`/`bot`/`unknown`) consumed by [`$waf_ua_is_spoofed`](#descriptive-ua-variables-waf_ua_). **Optional** — when unset the JA4 half of the spoof signal is inert and `$waf_ua_is_spoofed` degrades to the CIDR-only half. Regenerate offline from a ja4db dump (procedure in the shipped `lists/ja4.list` header). Hot-reloadable. |
 | `waf_server_token` | `<string>` | `Apache/2.4.68 (Unix)` | The fake `Server:` token and the error-page fingerprint. |
 | `waf_reason_header` | `on`\|`off` | `off` | Stamp the per-request heavybag verdict token (`$waf_reason`: `none`, `scanner_path`, `args`, `fake_bot`, …) onto the response as `X-WAF-Reason`. **OFF by default — production must not disclose which rule matched** (it aids evasion). Intended for the detect-mode replay/test harness, where it gives per-request verdict attribution on the wire. Independent of `waf` mode (renders `none` when no verdict was resolved). |
-| `waf_geo_db` | `<path>` | — | Path to the IPFire `location.db` (mmap'd read-only; read by the embedded nanolibloc adaptation, no libloc dependency). |
+| `waf_geo_db` | `<path>` | — | Path to the IPFire `location.db` (mmap'd read-only; read by the embedded nanolibloc adaptation, no libloc dependency). **Update it atomically:** write the new file under a temporary name and `rename(2)` it over the live path (`mv` on the same filesystem). **Never truncate or rewrite it in place** (`> location.db`, `curl -o`/`wget -O` onto the live path, `cp` over it, `rsync --inplace`): the file stays mmap'd for the whole configuration cycle, and shortening the inode under a live mapping makes every worker that reads past the new EOF take **SIGBUS** mid-request. `rename(2)` only swaps the directory entry, so the old inode stays alive for the running workers until the next reload re-maps. heavybag rejects a size change it detects *during* load, but a truncation *after* a successful load stays fatal by design (the same trade-off nginx makes for its own mmap'd files). |
 | `waf_geo_block` | `<CC> …` | — | Block these country codes (ISO-3166 two-letter, plus IPFire specials A1/A2/A3/T1/XD) → 403. |
 | `waf_asn_block` | `<ASN> …` | — | Block these autonomous systems (decimal, 1..4294967295) when the client IP resolves to one via the geo DB → 403. `asn==0` / no record fails open. Repeatable / multi-arg. |
 | `waf_method_allow` | `<METHOD> …` | — | **Whitelist:** only the listed HTTP methods pass; every other method → 404. Standard methods (GET, HEAD, POST, PUT, DELETE, OPTIONS, PATCH, TRACE, the WebDAV verbs, …) map to nginx's method bits; non-standard names (e.g. TRACK) are matched verbatim. Wins over `waf_method_deny`. |
@@ -314,6 +314,8 @@ variable, independent of `waf` / `waf_bot_block`.
 | `waf_rate_limit` | `rate=Nr/s\|Nr/m\|Nr/h [burst=N] [for_geo=CC,…]` | — | Per-IP token-bucket limit; over the limit → **429**. `rate` is the steady refill, `burst` the bucket capacity (default = one period's worth). Repeatable: at most **one default** rule (no `for_geo`) plus any number of country-scoped `for_geo` overrides. Detect-mode-aware (`would_block[rate_limit]`). Requires `waf_rate_zone`. |
 | `waf_mail_auth` | *(none)* | — | Turn this `location` into the `ngx_mail` `auth_http` endpoint. |
 | `waf_mail_backend` | `<ip> <port>` | — | Upstream MTA returned as `Auth-Server`/`Auth-Port` on allow. **Numeric IP only** (the mail proxy cannot resolve hostnames). |
+| `waf_mail_trusted_secret` | `<token>` | — | Shared secret that authenticates the caller of the `auth_http` endpoint. The forwarded `Client-IP` is honoured **only** when the request comes from a loopback/unix peer **and** carries an `X-WAF-Key` header matching this token (constant-time compare). Everything else — no secret configured, header missing or mismatched, remote peer — is **fail-closed**: `Client-IP` is ignored and the real connection peer is judged. Set the same token on the mail side with `auth_http_header X-WAF-Key "<token>";`. See [Mail (SMTP) protection](#mail-smtp-protection). |
+| `waf_mail_failopen` | `on`\|`off` | `on` | What to do when an **authenticated** caller sends an auth request whose `Client-IP` is missing or unparseable. Default `on` = **fail open: that request is allowed with no WAF judgement at all** (no reputation check, no rate limit), so a malformed header cannot break mail delivery; it is WARN-logged and, having reached no verdict, is not counted in `/waf/status`. `off` denies it instead (`Auth-Status: mail client-ip missing`). |
 | `waf_status` | *(none)* | — | `location`-only. Turn this `location` into the lock-free statistics endpoint (see [Statistics / status endpoint](#statistics--status-endpoint)). Wrap it in an access-restricted location. |
 
 ### Scanner list file format
@@ -680,8 +682,11 @@ address.
 The stock `ngx_mail` proxy authenticates connections against an `auth_http`
 endpoint. This module serves that endpoint: it reads the `Client-IP`
 request header (the real SMTP peer, injected by `ngx_mail` from
-`s->connection->addr_text` — unspoofable), runs the shared
-`reputation_check`, and returns a header-only response:
+`s->connection->addr_text`), runs the shared `reputation_check`, and returns a
+header-only response.
+
+`Client-IP` is a plain request header, so it is only as trustworthy as the
+caller that sent it — see the trust model below before deploying.
 
 - **Allow:** `Auth-Status: OK` + `Auth-Server`/`Auth-Port` (from
   `waf_mail_backend`). Both are mandatory; if `waf_mail_backend` is unset the
@@ -689,19 +694,67 @@ request header (the real SMTP peer, injected by `ngx_mail` from
   the session.
 - **Deny:** `Auth-Status: <reason>` — `ngx_mail` prepends its SMTP error
   code, e.g. `535 5.7.0 static blocklist`.
-- **Fail-open:** missing/unparseable `Client-IP` → allow + a warning log,
-  so a format error cannot break the whole mail flow.
-- **Trusted-peer gate:** the `Client-IP` header is honoured **only** when the
-  auth request itself arrives from a loopback peer (`127.0.0.0/8`, `::1`) or a
-  Unix socket. From any other peer the header is ignored and the *connection*
-  peer is judged instead, with a warning — so a wrongly-exposed endpoint cannot
-  be steered by a spoofed `Client-IP`. This is why the endpoint must stay bound
-  to `127.0.0.1`.
+- **Fail-open:** missing/unparseable `Client-IP` from an *authenticated* caller
+  → allow + a warning log, so a format error cannot break the whole mail flow.
+  This is the `waf_mail_failopen on` default; see the directive table for the
+  full consequence and how to flip it.
 - **Rate limit:** the mail head also runs the shared per-IP token-bucket
   limiter — any `waf_rate_limit` rule on the auth `location` applies. Over the
   limit it answers `Auth-Status: rate limit` and bumps the same
   `http_blocked_rate_limit` / `http_resp_429` counters as the HTTP head.
-  Requires a `waf_rate_zone` declared in `http{}` (else it fail-opens).
+  Requires a `waf_rate_zone` declared in `http{}` (else it fail-opens). An
+  address matched by `waf_allowlist` (with the default `full` scope) skips the
+  rate stage entirely, exactly as on the HTTP head — a trusted relay is never
+  throttled by its own auth traffic.
+- **Accounting:** the mail head is a first-class citizen of the exported
+  invariant `requests_total == allowed + Σ blocked` — it moves the same global
+  `http_*` counters as the HTTP head (there is no per-vhost slot for it, and no
+  separate `mail_*` counters). The two unjudged edges above (fail-open allow,
+  and the `waf_mail_failopen off` deny) reach no verdict and are deliberately
+  not counted.
+
+#### Trust model: who may dictate the judged address
+
+`Client-IP` is attacker-controllable for anyone who can reach the endpoint. The
+loopback/unix peer test alone is a **topology filter, not an authenticator**: on
+a host that runs any other local process, that process can `connect()` to the
+endpoint and forge a `Client-IP` to pick its own WAF verdict. The endpoint
+therefore authenticates the caller with a shared secret:
+
+- Set `waf_mail_trusted_secret <token>;` on the auth `location`, and
+  `auth_http_header X-WAF-Key "<token>";` in the `mail{}` block, so `ngx_mail`
+  attaches it to every auth request.
+- The forwarded `Client-IP` is honoured **only** when both hold: the peer is
+  loopback/unix (kept as the cheap first filter) **and** `X-WAF-Key`
+  constant-time-matches the configured secret.
+- **Default is fail-closed.** No secret configured, header missing, value
+  mismatched, or a remote peer → `Client-IP` is ignored and the *real*
+  connection peer is judged, with a warning naming the specific reason.
+
+Without a configured secret the endpoint still works, but every session is
+judged on the mail proxy's own loopback address — effectively disabling
+per-sender reputation for mail. Use a high-entropy token (`openssl rand -hex
+32`) and treat `nginx.conf` as secret-bearing. An empty token is rejected at
+config time.
+
+```nginx
+http {
+    server {
+        listen 127.0.0.1:8081;
+        waf off;                                    # the endpoint judges for itself
+        location = /waf-mail-auth {
+            waf_mail_auth;
+            waf_mail_backend         127.0.0.1 2526;
+            waf_mail_trusted_secret  <token>;
+        }
+    }
+}
+
+mail {
+    auth_http         127.0.0.1:8081/waf-mail-auth;
+    auth_http_header  X-WAF-Key "<token>";
+}
+```
 
 ```mermaid
 sequenceDiagram

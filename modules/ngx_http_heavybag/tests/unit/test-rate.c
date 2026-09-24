@@ -38,12 +38,21 @@
 
 /* ---- table + sockaddr helpers ------------------------------------------ */
 
+/* bytes a real zone would map from the header on: [hdr][slot x n] */
+static size_t
+avail_of(ngx_uint_t n)
+{
+    return sizeof(ngx_http_heavybag_rate_hdr_t)
+           + (size_t) n * sizeof(ngx_http_heavybag_rate_slot_t);
+}
+
 static ngx_http_heavybag_rate_hdr_t *
 mk_table(ngx_uint_t n)
 {
-    size_t  sz = sizeof(ngx_http_heavybag_rate_hdr_t)
-                 + (size_t) n * sizeof(ngx_http_heavybag_rate_slot_t);
+    size_t  sz = avail_of(n);
     ngx_http_heavybag_rate_hdr_t  *hdr = calloc(1, sz);
+    /* stamped like a fresh segment from ngx_http_heavybag_rate_init_zone */
+    hdr->layout = HEAVYBAG_RATE_SHM_LAYOUT;
     hdr->nslots = n;
     return hdr;
 }
@@ -641,6 +650,101 @@ CTEST(rate, slot_older_than_period_still_evictable)
     free(hdr);
 }
 
+
+
+/* ======================================================================= *
+ *  V20-V23  (M9 / SV16 fix) shm re-attach validation.                      *
+ *                                                                          *
+ *  ngx_http_heavybag_rate_init_zone used to adopt a persisted segment       *
+ *  (shm.exists) with no check at all, and rate_check trusts hdr->nslots as  *
+ *  its SINGLE modulo/index bound -- so a segment written by another build   *
+ *  (different header/slot layout) or a header claiming more slots than the  *
+ *  zone maps turns every probe into an OOB read and every claim/evict CAS   *
+ *  into an OOB write. The adoption decision is now the pure predicate       *
+ *  ngx_http_heavybag_rate_hdr_valid(hdr, avail), tested here directly; the  *
+ *  init-zone wiring around it (ngx_shm_zone_t/slab coupled) stays out of    *
+ *  unit scope, like the MIN_SLOTS back-off loop.                            *
+ * ======================================================================= */
+
+/* V20  a segment stamped by THIS build, sized consistently -> adopt */
+CTEST(rate, hdr_valid_accepts_own_layout)
+{
+    const ngx_uint_t               n = 128;
+    ngx_http_heavybag_rate_hdr_t  *hdr = mk_table(n);
+
+    ASSERT_EQUAL(NGX_OK, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+    free(hdr);
+}
+
+
+/* V21  wrong / absent layout signature -> reject (fail closed) */
+CTEST(rate, hdr_valid_rejects_wrong_layout)
+{
+    const ngx_uint_t               n = 128;
+    ngx_http_heavybag_rate_hdr_t  *hdr = mk_table(n);
+
+    /* a build whose header or slot struct differs by any byte */
+    hdr->layout = HEAVYBAG_RATE_SHM_LAYOUT ^ 0x1u;
+    ASSERT_EQUAL(NGX_ERROR, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+
+    /* a pre-fix segment: the word was never stamped (zeroed slab) */
+    hdr->layout = 0;
+    ASSERT_EQUAL(NGX_ERROR, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+
+    /* restoring it makes the very same header acceptable again */
+    hdr->layout = HEAVYBAG_RATE_SHM_LAYOUT;
+    ASSERT_EQUAL(NGX_OK, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+    free(hdr);
+}
+
+
+/* ======================================================================= *
+ *  V22  nslots vs zone size: a correctly-stamped header whose nslots does   *
+ *  not fit the mapped bytes is the OOB primitive itself -> reject. The      *
+ *  boundary is exercised exactly (fits / one slot too many).                *
+ * ======================================================================= */
+CTEST(rate, hdr_valid_rejects_nslots_over_zone)
+{
+    const ngx_uint_t               n = 128;
+    ngx_http_heavybag_rate_hdr_t  *hdr = mk_table(n);
+
+    /* claims 4x the table the zone actually maps */
+    hdr->nslots = n * 4;
+    ASSERT_EQUAL(NGX_ERROR, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+
+    /* exactly one slot past the end -> still rejected */
+    hdr->nslots = n + 1;
+    ASSERT_EQUAL(NGX_ERROR, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+
+    /* the exact fit is accepted (no off-by-one in the other direction) */
+    hdr->nslots = n;
+    ASSERT_EQUAL(NGX_OK, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+
+    /* same header, a zone truncated to the bare header -> rejected */
+    ASSERT_EQUAL(NGX_ERROR,
+        ngx_http_heavybag_rate_hdr_valid(hdr,
+                                         sizeof(ngx_http_heavybag_rate_hdr_t)));
+    free(hdr);
+}
+
+
+/* V23  NULL shpool->data and a below-MIN_SLOTS table are rejected too */
+CTEST(rate, hdr_valid_rejects_null_and_tiny)
+{
+    const ngx_uint_t               n = 128;
+    ngx_http_heavybag_rate_hdr_t  *hdr = mk_table(n);
+
+    ASSERT_EQUAL(NGX_ERROR,
+        ngx_http_heavybag_rate_hdr_valid(NULL, avail_of(n)));
+
+    /* no init path ever produces fewer than MIN_SLOTS slots */
+    hdr->nslots = HEAVYBAG_RATE_MIN_SLOTS - 1;
+    ASSERT_EQUAL(NGX_ERROR, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+
+    hdr->nslots = HEAVYBAG_RATE_MIN_SLOTS;
+    ASSERT_EQUAL(NGX_OK, ngx_http_heavybag_rate_hdr_valid(hdr, avail_of(n)));
+    free(hdr);
+}
 
 
 /* rate_overflow(NULL): the exported accessor fail-opens to 0 when no zone is

@@ -46,6 +46,7 @@ typedef uintptr_t      ngx_uint_t;
 typedef uint64_t       ngx_atomic_t;
 typedef uint64_t       ngx_atomic_uint_t;
 typedef uint64_t       ngx_msec_t;
+#define ngx_inline inline
 
 #endif
 

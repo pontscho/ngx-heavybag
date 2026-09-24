@@ -148,6 +148,8 @@ static char *ngx_http_heavybag_set_mail_auth(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_heavybag_set_mail_backend(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_http_heavybag_set_mail_secret(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static char *ngx_http_heavybag_set_status(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_http_heavybag_set_rate_zone(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -222,11 +224,26 @@ static ngx_command_t  ngx_http_heavybag_commands[] = {
       NULL },
 
     /* waf_mail_failopen on|off: governs the SMTP auth_http endpoint's behaviour
-     * when a TRUSTED peer sends a missing / unparseable Client-IP. Default on
-     * keeps the historic fail-OPEN (allow + WARN, never break mail delivery on
-     * a malformed header). off makes that single edge fail CLOSED (deny) for
-     * operators who would rather drop an unattributable mail auth than let it
-     * through unjudged. Default on preserves backward compatibility. */
+     * when an AUTHENTICATED caller (see waf_mail_trusted_secret) sends a
+     * missing / unparseable Client-IP.
+     *
+     * THE DEFAULT IS ON = FAIL-OPEN, and the consequence is deliberate and
+     * worth stating plainly: such an auth request is ALLOWED WITHOUT ANY WAF
+     * JUDGEMENT -- no reputation check, no rate limit -- so that a malformed
+     * header can never break mail delivery. It is WARN-logged ("mail auth
+     * without parseable Client-IP, allowing") and, having reached no verdict,
+     * is not counted in the /waf/status totals.
+     *
+     * Keeping the fail-open default is low-stakes because the shared-secret
+     * trust model (waf_mail_trusted_secret, SV11) already closes the evasion
+     * vector this edge used to expose: an unauthenticated local process cannot
+     * reach the fail-open branch at all -- its Client-IP is ignored and it is
+     * judged on its own peer address. The residual case is a genuinely
+     * authenticated proxy that omits Client-IP.
+     *
+     * off makes that single edge fail CLOSED (deny, Auth-Status "mail
+     * client-ip missing") for operators who would rather drop an
+     * unattributable mail auth than let it through unjudged. */
     { ngx_string("waf_mail_failopen"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
       ngx_conf_set_flag_slot,
@@ -407,6 +424,17 @@ static ngx_command_t  ngx_http_heavybag_commands[] = {
     { ngx_string("waf_mail_backend"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
       ngx_http_heavybag_set_mail_backend,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
+    /* waf_mail_trusted_secret <token>: the shared secret that authenticates
+     * the caller of the SMTP auth_http endpoint. Without it (the default) the
+     * forwarded Client-IP is never trusted and the real connection peer is
+     * judged -- fail-closed. See heavybag_authhttp.c's trust-model note. */
+    { ngx_string("waf_mail_trusted_secret"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_http_heavybag_set_mail_secret,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
       NULL },
@@ -1499,6 +1527,14 @@ ngx_http_heavybag_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
         conf->mail_backend_port = prev->mail_backend_port;
     }
 
+    /* mail auth_http shared secret: inherit when this level did not set one.
+     * NULL data (not len) is the sentinel -- the setter rejects an empty
+     * token, so a configured secret always has data != NULL. Unset at every
+     * level leaves it empty, which is the fail-closed default. */
+    if (conf->mail_trusted_secret.data == NULL) {
+        conf->mail_trusted_secret = prev->mail_trusted_secret;
+    }
+
     /* rate-limit rules: inherit the whole set when this level defined none */
     if (conf->rate_rules == NULL) {
         conf->rate_rules = prev->rate_rules;
@@ -2046,6 +2082,39 @@ ngx_http_heavybag_set_mail_backend(ngx_conf_t *cf, ngx_command_t *cmd, void *con
 
     wlcf->mail_backend_addr = value[1];
     wlcf->mail_backend_port = value[2];
+
+    return NGX_CONF_OK;
+}
+
+
+/*
+ * waf_mail_trusted_secret <token>: the shared secret that authenticates the
+ * caller of the SMTP auth_http endpoint. The operator mirrors it on the mail
+ * side with `auth_http_header X-WAF-Key "<token>";` so ngx_mail attaches the
+ * header to every auth request; the content handler then honours the
+ * forwarded Client-IP only when that header constant-time-matches this value
+ * (heavybag_authhttp.c). An empty token is rejected here rather than silently
+ * degrading the location to fail-closed: an operator who typed the directive
+ * meant to enable the feature.
+ */
+static char *
+ngx_http_heavybag_set_mail_secret(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_heavybag_loc_conf_t  *wlcf = conf;
+    ngx_str_t                *value = cf->args->elts;
+
+    if (wlcf->mail_trusted_secret.data != NULL) {
+        return "is duplicate";
+    }
+
+    if (value[1].len == 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "waf_mail_trusted_secret must not be empty "
+                           "(an empty token can never authenticate a caller)");
+        return NGX_CONF_ERROR;
+    }
+
+    wlcf->mail_trusted_secret = value[1];
 
     return NGX_CONF_OK;
 }
