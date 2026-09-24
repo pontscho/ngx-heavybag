@@ -774,13 +774,12 @@ sequenceDiagram
     C->>M: connect + AUTH
     M->>A: auth request (Client-IP = real SMTP peer)
 
-    alt request peer is loopback / unix (trusted)
+    alt peer is loopback / unix AND X-WAF-Key matches waf_mail_trusted_secret
         Note over A: judge the Client-IP address
-    else any other peer (exposed endpoint)
+        Note over A: Client-IP missing / unparseable -> Auth-Status OK (waf_mail_failopen on, warn)
+    else no secret / key missing or wrong / remote peer (fail-closed)
         Note over A: ignore Client-IP, judge the connection peer (warn)
     end
-
-    Note over A: Client-IP missing / unparseable -> Auth-Status OK (fail-open, warn)
 
     A->>R: reputation_check(sa)  (+ per-IP rate limit)
 

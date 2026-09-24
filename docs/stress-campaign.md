@@ -1,7 +1,7 @@
 ---
 name: stress-campaign
 type: analysis
-status: stale
+status: active
 title: Stress & Load Campaign Ledger
 description: Cross-session ledger of the reproducible stress/load campaign — scenarios, S3 counter invariants, and result tables.
 sources:
@@ -11,8 +11,8 @@ sources:
   - modules/ngx_http_heavybag/tests/live/live-slo-path.sh
   - modules/ngx_http_heavybag/tests/live/live-slo-local.sh
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: 2408c09
+  date: 2026-09-24
 links:
   - stress-testing
   - overview
@@ -75,7 +75,14 @@ Measured on the counter delta around a concurrent mixed-load window:
 
 - **HTTP:**  `Δhttp_requests_total == Δhttp_allowed + Σ Δhttp_blocked[reason]`
 - **STREAM:** `Δstream_connections_total == Δstream_allowed + Σ Δstream_denied[reason]`
-- **MAIL:** no status counter → **wire-only** (Auth-Status OK/deny), allow+deny mix.
+- **MAIL:** verdict read off the wire (Auth-Status OK/deny), allow+deny mix. The mail
+  head does move the global `http_*` counters
+  (`modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_handler`),
+  so S3 runs the mail probes *after* the "after" snapshot and they never enter the
+  HTTP delta; the probes send `X-WAF-Key` because `Client-IP` is honoured only for
+  an authenticated caller
+  (`modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_caller_trusted`,
+  `modules/ngx_http_heavybag/tests/run-stress-tests.sh`).
 - **Side assertions:** `Δhttp_allowlist_hits ≤ Δhttp_allowed` (subset, NOT an addend);
   no counter delta goes negative (monotonic).
 - **Excluded by construction:** the `would_block[*]` overlay (detect requests count
@@ -86,7 +93,8 @@ Measured on the counter delta around a concurrent mixed-load window:
   asn method args cookie referer fake_bot rate_limit spoof`.
 
 The sharpest surface: the HTTP head and the stream head (port 28391) draw rate
-budget from the **same** `waf_rate` shm zone (`heavybag_stream.c:449-454`); loading
+budget from the **same** `waf_rate` shm zone, which the stream head resolves by
+name in `modules/ngx_http_heavybag/src/heavybag_stream.c:ngx_stream_heavybag_init_module`; loading
 both concurrently with `worker_processes >= 2` is the real lock-free race the
 `concurrent_same_key` TSan micro-bench only approximates.
 

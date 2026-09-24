@@ -1,7 +1,7 @@
 ---
 name: qa-test-matrix
 type: analysis
-status: current
+status: active
 title: QA Test-Matrix Round (Permanent Regression Net)
 description: The seven-phase test-matrix round that codifies the 142-vector QA backlog into a permanent unit/integration/build regression net.
 sources:
@@ -22,8 +22,8 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_status.c:ngx_http_heavybag_stat_cc_bump
   - cmake/Tests.cmake
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: 2408c09
+  date: 2026-09-24
 links:
   - qa-findings
   - qa-subunit-inventory
@@ -387,6 +387,19 @@ The campaign critic flagged four surfaces it had not fuzzed to the depth of the 
 | #8 | rate + geo rule-select | `:117` `rate_rule_select(&verdict)` | `for_geo=FR` strict rule (burst=1) selected for an FR Client-IP -> req2 `rate limit`; a US Client-IP falls to the default lenient rule -> stays OK (proves selection gates on `verdict.geo_valid` + country) |
 
 **Verdict:** **no production defect.** The handler is robust against every malformed/hostile `Client-IP` (clean fail-open, no crash, no reflection), the untrusted-peer trust boundary holds, the v6 path works, and all five reputation reasons map correctly into `Auth-Status`. Purely additive test coverage — **no `src/*.c`/`*.h` edited; deployed SSL `.so` md5 `03a216df17d1661854e8287045050eb8` unchanged** (build==deploy). New files: `tests/run-mailauth-fuzz.sh`, `tests/heavybag-mailauth-fuzz.conf`, +1 CTest registration in `cmake/Tests.cmake`. Unit/integration totals rise to: integration now includes mailauth (32). CTest test count 10 -> 11 (`heavybag_mailauth`).
+
+> **Current state (re-checked at 2408c09).** The trust model this round
+> exercised has since changed. A loopback/unix peer alone no longer earns
+> `Client-IP` trust: the caller must also send an `X-WAF-Key` that
+> constant-time-matches `waf_mail_trusted_secret`. Without a secret, or with the
+> key missing or wrong, the real connection peer is judged
+> `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_caller_trusted`.
+> So edge #1/#2's fail-open now applies only to an *authenticated* caller
+> (`waf_mail_failopen`, default on, `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_handler`).
+> The harness sends the key on every trusted probe and adds a dedicated
+> X-WAF-Key block: correct key, missing key, wrong key of equal and of different
+> length, and no secret configured (`modules/ngx_http_heavybag/tests/run-mailauth-fuzz.sh`).
+> The `:NN` line references in the table above point at the file as it was then.
 
 **Still un-probed (optional, separate rounds):** spoof self-swap (the JA4↔UA family-mismatch matrix), stat_cc table saturation (513+ distinct country codes -> `cc_overflow` silent-drop path). Each is green-but-shallow, not a known bug. (reputation verdict-precedence CLOSED — see below.)
 

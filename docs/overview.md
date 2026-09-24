@@ -1,21 +1,23 @@
 ---
 name: overview
 type: overview
-status: current
+status: active
 title: Project Overview — ngx_http_heavybag (edge firewall)
 description: What heavybag is, its architecture, and the map to every wiki page.
 sources:
   - README.md
   - modules/ngx_http_heavybag/config
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: 2408c09
+  date: 2026-09-24
 links:
   - threat-model
   - threat-intel-sources
   - stress-testing
   - stress-campaign
-  - qa-campaign
+  - qa-findings
+  - qa-test-matrix
+  - qa-subunit-inventory
   - honeypot-B-plan
   - stats-implementation-plan
   - user-agent-plan
@@ -51,14 +53,48 @@ lock-free shm zones — the rate limiter
 `modules/ngx_http_heavybag/src/heavybag_status.c`. Full directive reference,
 build instructions, and per-head behaviour live in `README.md`.
 
+The reputation *configuration* is shared too, not only the decision: the
+merge, the fail-closed geo-dependency validation and the directive setters for
+geo/ASN/flag/block/allow lists live once in `heavybag_reputation.c`
+(`modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_rep_conf_merge`,
+`modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_rep_conf_validate`),
+and the HTTP and stream heads both call into them, so the two heads cannot
+drift apart on inheritance or validation order.
+
+## Behaviour worth knowing before reading the code
+
+- **Unknown-geo sources pass by default.** A source the geo DB has no record
+  for passes the reputation stage (the deny-list convention). Denying it is an
+  explicit opt-in, the `unknown` token of `waf_flag_block`
+  `modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_flag_add`;
+  the README warns that it also denies loopback/RFC1918 `README.md`.
+- **Mail head trusts `Client-IP` only from an authenticated caller.** The
+  forwarded address is honoured only when the peer is loopback/unix **and** the
+  request carries an `X-WAF-Key` that constant-time-matches
+  `waf_mail_trusted_secret`; every other case judges the real connection peer
+  `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_caller_trusted`,
+  `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_secret_eq`.
+  `waf_mail_failopen` (default on) still allows an *authenticated* request whose
+  `Client-IP` is missing or unparseable, by design `README.md`.
+- **Subrequests are not re-inspected.** Only the main request runs the
+  pipeline (`r != r->main` bail), so a stricter ruleset on a subrequest's target
+  location never applies `README.md`.
+- **PCRE2 is a build requirement.** The bounded regex helper
+  `modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_regex_exec`
+  has a PCRE2 arm with match/depth limits; the PCRE1 arm is an `#error` outside
+  the unit-test build.
+
 ## Subsystems (by source directory)
 
 - **HTTP module glue** — directives, phases, merge, `$waf_*` variables
   `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c`.
 - **Reputation core** — the shared allow/block/geo/asn/flag/country decision
+  plus the shared rep-conf merge/validate/setter layer
   `modules/ngx_http_heavybag/src/heavybag_reputation.c`.
 - **Geo / signature verify** — IPFire `location.db` reader + load-time ECDSA
-  P-521 verify `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_verify`.
+  P-521 verify `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_verify`;
+  the IPv4-mapped root descent refuses a malformed tree at load time
+  `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_ipv4root`.
 - **Signature matching** — scanner/args/cookie/referer buckets + UA classify
   `modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_scanner_lookup`.
 - **Rate limiting** — lock-free per-IP token bucket
@@ -79,7 +115,11 @@ build instructions, and per-head behaviour live in `README.md`.
 - [[user-agent-plan]] — descriptive UA parser + JA4/UA spoof design.
 - [[stress-testing]] — operational stress/load testing guide.
 - [[stress-campaign]] — stress campaign ledger and result tables.
-- [[qa-campaign]] — QA hardening campaign findings ledger.
+- [[qa-findings]] — QA hardening campaign findings ledger and fix dispositions.
+- [[qa-test-matrix]] — the permanent unit/integration/build regression net.
+- [[qa-subunit-inventory]] — per-translation-unit risk and unit-test coverage.
 
 > Build, configuration, and the full directive reference are in the
-> repo-root `README.md` (linked, not duplicated here).
+> repo-root `README.md` (linked, not duplicated here). The S6–S8 code and
+> security review reports and the fix task list sit under `docs/reviews/`
+> as review artifacts, outside the wiki's page contract.
