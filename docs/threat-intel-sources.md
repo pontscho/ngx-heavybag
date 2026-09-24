@@ -1,7 +1,7 @@
 ---
 name: threat-intel-sources
 type: reference
-status: current
+status: active
 title: External Threat-Intel Sources for Header-Attack Fixtures
 description: Catalogue of external, machine-readable threat-intel feeds used to source the WAF header-attack fixtures.
 sources:
@@ -9,8 +9,8 @@ sources:
   - modules/ngx_http_heavybag/lists/bot.list
   - modules/ngx_http_heavybag/lists/referer.list
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: 10bc7ea
+  date: 2026-09-24
 links:
   - threat-model
   - honeypot-B-plan
@@ -36,7 +36,11 @@ source catalogue for the honeypot program's **header dimension**
 
 The module already matches on:
 `User-Agent` (`scanner-ua.list` / `bot.list`), `Referer` signatures, `Cookie`
-signatures, query-arg signatures, and CIDR-based **fake-bot** verification.
+signatures, query-arg signatures, and CIDR-based **fake-bot** verification
+(directives `waf_scanner_ua_list` / `waf_bot_list` / `waf_referer_list` /
+`waf_cookie_list` / `waf_args_list` in
+`modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c`; the fake-bot CIDR
+table `modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_verified_bot_compile`).
 
 Two classes of source follow:
 - **§1 — feeds existing matchers** (UA / fake-bot / referer): direct TP fixture.

@@ -1,7 +1,7 @@
 ---
 name: threat-model
 type: analysis
-status: current
+status: active
 title: Edge Threat Model & Honeypot Analysis
 description: Empirical attack-surface analysis over the 1.65M-request edge log corpus driving scanners.list and geo/ASN tuning.
 sources:
@@ -11,8 +11,8 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_geo.c
   - reference/geolookup.c
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: 10bc7ea
+  date: 2026-09-24
 links:
   - threat-intel-sources
   - honeypot-B-plan
@@ -303,21 +303,21 @@ covered set (every vector heavybag blocks today), not top-N.
 
 The procedure (reproducible, core-perl + nginx only — **no docker**):
 
-1. **Freeze** (`tools/freeze-regression-fixture.pl`, run once against a
+1. **Freeze** (`modules/ngx_http_heavybag/tools/freeze-regression-fixture.pl`, run once against a
    live regression-nginx): a two-pass probe per dimension. The *detect* vhost
    yields the authoritative `X-WAF-Reason`; a vector is frozen iff its reason
    != `none`. The *enforce* vhost then yields the real HTTP status. Frozen
    verdict = `{expected_reason: detect, expected_status: enforce}`. Outputs the
    committed `regression-vectors.jsonl` (path/args, keyed by uri) and
    `regression-headers.jsonl` (ua/referer/cookie/fakebot, keyed by value).
-2. **Assert** (`tests/run-regression-tests.sh`, modelled on `run-stat-tests.sh`):
+2. **Assert** (`modules/ngx_http_heavybag/tests/run-regression-tests.sh`, modelled on `run-stat-tests.sh`):
    an FP gate (benign baseline must not block) plus an enforce replay of the
    committed fixture, joining each result to its frozen verdict and asserting
    the `(reason,status)` tuple per vector. A 444 (`NGX_HTTP_CLOSE`, observed as
    a byte-0 connection close — no `X-WAF-Reason` reaches the wire) is asserted
    status-only; its reason stands frozen from generation time.
 
-The harness uses a dedicated config (`tests/heavybag-regression-test.conf`, ports
+The harness uses a dedicated config (`modules/ngx_http_heavybag/tests/heavybag-regression-test.conf`, ports
 283xx) with detect+enforce vhost pairs and **exactly one matcher per vhost**
 (PREACCESS is first-match-wins, so dimensions stay isolated); no `proxy_pass`,
 no `waf_trusted_proxy`, no rate/geo — the only verdict is the matcher under
@@ -328,8 +328,8 @@ Current frozen fixture: **40,614** path/args vectors + **160** header vectors
 (`expected_status` ∈ {404: 40,573, 403: 146, 444: 55}); the enforce replay runs
 in ~25 s and asserts 100% frozen-match. (Re-frozen 2026-06-15 across two §6 A
 gap-loop iterations — a fixture re-freeze is mandatory whenever a list edit
-intentionally changes coverage or an action bucket.) It complements the existing 6 unit +
-131 integration tests with **live-fire** samples.
+intentionally changes coverage or an action bucket.) It complements the unit and
+integration suites registered in `cmake/Tests.cmake` with **live-fire** samples.
 
 ### D — ASN / geo tuning from attacker IPs (DONE)
 
@@ -344,12 +344,23 @@ The procedure (reproducible, read-only on the log, libc + core-perl only —
 **never libloc / the `location` CLI**):
 
 1. **Resolve** (`reference/geolookup.c`): a standalone, libc-only IP →
-   CC / ASN / flags reader, a faithful port of the **bounds-guarded** walk /
-   lookup in `modules/ngx_http_heavybag/src/heavybag_geo.c` (NOT `loctest.c`, which carries
+   CC / ASN / flags reader, a port of the **bounds-guarded** walk / lookup in
+   `modules/ngx_http_heavybag/src/heavybag_geo.c` (NOT `reference/loctest.c`, which carries
    the pre-fix geo-OOB bug — no `net*12+12 ≤ len[ND]` guard, and a `nxt*=12` that
-   can wrap before its bounds check). Both `size_t` guards are preserved; the
-   libloc signature verify is skipped (offline, locally-trusted DB → no
-   `-lcrypto`). Built manually like `loctest.c`/`locverify.c`, **not** in the
+   can wrap before its bounds check). It ports the width-independent entry bound
+   (`idx >= len/12`, checked before any multiply) at all three trie sites — the
+   IPv4-root descent, the walker and the ND-leaf decode —
+   `reference/geolookup.c:geo_entry_oob`, mirroring
+   `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_entry_oob`,
+   and the fail-closed `/96` IPv4-root descent (a zero child anywhere in the
+   chain is a hard load error, never a silent fallback to the v6 root)
+   `reference/geolookup.c:geo_open`, mirroring
+   `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_ipv4root`.
+   Two module guards are deliberately **not** ported: the post-mmap size
+   re-check `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_open`
+   (a short-lived offline run just dies on SIGBUS) and the libloc signature
+   verify `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_verify`
+   (offline, locally-trusted DB → no `-lcrypto`). Built manually like `loctest.c`/`locverify.c`, **not** in the
    module build: `cc -O2 -Wall -Wextra -o /tmp/geolookup reference/geolookup.c`.
 2. **Per-IP volume** (`extract-replay-vectors.pl --ip-volume`): one pass over the
    corpus emits `replay-ip-volume.jsonl` — per source IP a `total` / `hostile` /
@@ -368,7 +379,7 @@ The procedure (reproducible, read-only on the log, libc + core-perl only —
    **paste-ready** directive block (surgical levers live, coarse/advisory levers
    commented).
 
-`tests/run-honeypot-d.sh` wires it end-to-end (build → extract → report). The
+`modules/ngx_http_heavybag/tests/run-honeypot-d.sh` wires it end-to-end (build → extract → report). The
 per-IP feed and the report are **IP-bearing → gitignored** (Decision #75); the
 committed corpus feeds are untouched (the extractor's standard outputs go to a
 throwaway scratch dir, the IP feed to a fixed corpus path via `--ip-out`).

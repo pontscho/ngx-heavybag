@@ -8,10 +8,12 @@ sources:
   - README.md
   - modules/ngx_http_heavybag/config
 verified:
-  commit: 2408c09
+  commit: 10bc7ea
   date: 2026-09-24
 links:
   - threat-model
+  - mail-authhttp
+  - build-matrix
   - threat-intel-sources
   - stress-testing
   - stress-campaign
@@ -75,7 +77,8 @@ drift apart on inheritance or validation order.
   `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_caller_trusted`,
   `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_secret_eq`.
   `waf_mail_failopen` (default on) still allows an *authenticated* request whose
-  `Client-IP` is missing or unparseable, by design `README.md`.
+  `Client-IP` is missing or unparseable, by design `README.md`. Details in
+  [[mail-authhttp]].
 - **Subrequests are not re-inspected.** Only the main request runs the
   pipeline (`r != r->main` bail), so a stricter ruleset on a subrequest's target
   location never applies `README.md`.
@@ -107,6 +110,10 @@ drift apart on inheritance or validation order.
 
 ## Page map
 
+- [[mail-authhttp]] — the mail (SMTP) `auth_http` head: caller trust model,
+  `waf_mail_failopen`, counter accounting, `Auth-Status` outputs.
+- [[build-matrix]] — runbook for the build-portability matrix
+  (`heavybag_build_matrix`) and the `heavybag_module` self-heal.
 - [[threat-model]] — empirical attack-surface analysis and the data-driven
   rule-tuning loop (A–D).
 - [[threat-intel-sources]] — external feeds for the header-attack fixtures.
