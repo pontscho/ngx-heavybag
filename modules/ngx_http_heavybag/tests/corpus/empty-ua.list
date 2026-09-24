@@ -1,0 +1,20 @@
+# ngx_http_heavybag_module - INTENTIONALLY EMPTY UA signature list (test fixture)
+#
+# Zero patterns, on purpose. Consumed by:
+#   - heavybag-protocol-test.conf "uamerge" vhost (28509) / run-protocol-tests.sh
+#     Part C: a child level that points a waf_*_list at this file OWNS that
+#     category slot and turns it OFF -- it must NOT re-inherit the parent's
+#     compiled regex (ua-list-01 / T5.c). C8 there also asserts the
+#     "loaded 0 UA pattern(s)" NOTICE, which only a real start emits.
+#
+# run-config-tests.sh V35 covers the config-time twin (an explicitly empty
+# waf_bot_list must LOAD, not abort) against its own generated $WORK copy, so
+# that harness stays self-contained in its generated corpus.
+#
+# Every line here is a comment or blank, so ngx_http_heavybag_ua_list_compile
+# pushes zero tokens and compile_bucket leaves ua_re[cat] == NULL. That NULL is
+# exactly why the merge sentinel had to move from the compiled regex to the
+# list PATH (ua_list[cat].data): the regex alone cannot distinguish
+# "not configured at this level" from "configured to match nothing".
+#
+# DO NOT add a pattern to this file -- its emptiness IS the fixture.
