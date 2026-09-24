@@ -827,7 +827,7 @@ same reputation/geo semantics as the HTTP head:
 | `waf_geo_whitelist` | `<CC> …` | Allow only these countries (and known IPs); else dropped. Wins over `waf_geo_block`. |
 | `waf_flag_block` | `<flag> …` | Block by libloc network flag (`anycast`, `anonymous-proxy`, …), plus the `unknown` pseudo-flag. Same semantics as the HTTP head, including the **one policy unit** override rule and the off-by-default `unknown` token — see the [HTTP directive table](#directives). |
 | `waf_blocklist` | `<cidr>` | Statically deny this network. Repeatable. |
-| `waf_allowlist` | `<cidr>` | Allow this network, short-circuiting reputation. Repeatable. |
+| `waf_allowlist` | `<cidr>` | Allow this network, short-circuiting reputation — including the L4 rate limit below, with `waf_allowlist_scope full` (the default). Repeatable. |
 | `waf_stream_rate_limit` | `rate=Nr/s\|Nr/m\|Nr/h [burst=N] [for_geo=CC,…]` | Per-IP token-bucket limit at L4; over the limit → connection dropped. Same syntax/semantics as the HTTP `waf_rate_limit`; **the backing zone is the HTTP head's `waf_rate_zone`**, so a `waf_rate_zone` must be declared in `http{}` (if absent the check fail-opens). Detect-mode-aware (`stream_would_block[rate_limit]`). |
 
 There is no UA / scanner / spoofing in the stream head — L4 has no headers or

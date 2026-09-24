@@ -261,8 +261,24 @@ ngx_stream_heavybag_handler(ngx_stream_session_t *s)
      * reputation (for_geo). Over limit -> deny (enforce) or would_block
      * (detect). The backing zone is the HTTP head's waf_rate_zone; a NULL zone
      * fail-opens (stream rate limiting needs waf_rate_zone declared in http{}).
+     *
+     * Allowlist full-scope bypass -- lifecycle-v01 parity with the HTTP head
+     * (the `goto allowed` on reason ALLOWLIST in ngx_http_heavybag_module.c) and
+     * with the mail head (heavybag_authhttp.c). A waf_allowlist CIDR hit returns
+     * DECLINED with reason ALLOWLIST, and that trusted peer then skips the rate
+     * stage too, so trusted L4 infrastructure is never throttled by its own
+     * connections ("trusted == trusted") and an allowlisted, geo-less peer stays
+     * out of the default rate bucket. The stream head exposes NO
+     * waf_allowlist_scope directive (see ngx_stream_heavybag_commands above), so
+     * it follows the HTTP default -- scope full -- unconditionally. Only a real
+     * allowlist match reaches this: in detect mode a downgraded would-block
+     * keeps its own reason (blocklist / geo / ...), so it still hits the limiter.
+     * (#3 / SV9, CWE-284)
      */
-    if (!denied && sscf->rate_rules != NULL) {
+    if (!denied
+        && verdict.reason != HEAVYBAG_REASON_ALLOWLIST
+        && sscf->rate_rules != NULL)
+    {
         rate_rule = ngx_http_heavybag_rate_rule_select(sscf->rate_rules, &verdict);
         rate_shm = (ngx_stream_heavybag_rate_zone != NULL)
                    ? ngx_stream_heavybag_rate_zone->data : NULL;
