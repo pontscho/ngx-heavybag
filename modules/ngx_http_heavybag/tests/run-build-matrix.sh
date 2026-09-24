@@ -32,11 +32,10 @@
 #                  http_rewrite module hard-requires PCRE); a clean configure-time
 #                  diagnostic, NOT a heavybag source defect. Asserted as such.
 #
-# Trees are created ONCE (CMake makes objs/; fix-round-1 + this campaign make the
-# rest). On a fresh checkout where a non-core tree is missing, this script
-# bootstraps it via ./configure --builddir + the OpenSSL ssl.h touch-guard. The
-# three CORE trees (objs / objs-nossl / objs-nostream) are required; their absence
-# is a hard failure (run the CMake build + fix-round permutations first).
+# Trees are created ONCE (CMake makes objs/). Any other missing tree -- e.g. after
+# an nginx version bump re-extracts the source -- is bootstrapped here via
+# ./configure --builddir + the OpenSSL ssl.h touch-guard. Only the canonical objs/
+# tree is required; its absence is a hard failure (run the CMake build first).
 #
 # Usage:  bash run-build-matrix.sh
 # Exit 0 = every buildable permutation built clean and all symbol assertions held.
@@ -144,12 +143,16 @@ sym_tree   "objs (canonical)"        objs        yes  no
 
 echo
 echo "================  --without-http_ssl_module (config-01 + ja4ssl-build-001)  ================"
-build_tree "objs-nossl"              objs-nossl
+# http_v3 (QUIC) needs OpenSSL too, so it goes with the SSL modules.
+build_tree "objs-nossl"              objs-nossl \
+    's# --with-http_ssl_module##; s# --with-http_v3_module##; s# --with-stream_ssl_preread_module##; s# --with-mail_ssl_module##; s# --with-openssl=[^ ]*##'
 sym_tree   "objs-nossl"              objs-nossl  yes  yes
 
 echo
 echo "================  --without-stream (config-build-001)  ================"
-build_tree "objs-nostream"           objs-nostream
+# strip the --with-stream_* flags first: ' --with-stream' is their prefix.
+build_tree "objs-nostream"           objs-nostream \
+    's# --with-stream_realip_module##; s# --with-stream_ssl_preread_module##; s# --with-stream##'
 sym_tree   "objs-nostream"           objs-nostream  no   no
 
 echo
