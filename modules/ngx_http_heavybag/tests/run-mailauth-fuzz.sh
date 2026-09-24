@@ -4,7 +4,7 @@
 #
 # The QA-campaign critic's "un-probed authhttp SMTP" surface. The existing
 # protocol A12 + stat SMTP-auth stanzas cover only the trusted-loopback-peer +
-# well-formed IPv4 happy path. This harness drives the 8 fedetlen edges of
+# well-formed IPv4 happy path. This harness drives the fedetlen edges of
 # modules/ngx_http_heavybag/src/heavybag_authhttp.c against
 # heavybag-mailauth-fuzz.conf:
 #
@@ -17,6 +17,18 @@
 #   #7 missing waf_mail_backend    -> ERR-log-but-allow, no Auth-Server/Auth-Port
 #   #8 rate + geo rule-select      -> for_geo=CC rule chosen via verdict.geo_valid
 #   #9 waf_mail_failopen off       -> missing/garbage Client-IP fails CLOSED (deny)
+#      + a PIN on the actual merged default (fail-OPEN), so a silent flip fails
+#  #10 X-WAF-Key trust model       -> Client-IP honoured ONLY on an authenticated
+#      channel; missing / wrong key, or no configured secret, judges the REAL peer
+#  #11 allowlist bypasses the rate stage (a trusted relay cannot DoS itself)
+#  #12 exported counter invariant  -> requests_total == allowed + sum(blocked)
+#
+# TRUST MODEL (T4.d / SV11). The handler honours the forwarded Client-IP only
+# when the caller authenticates with `X-WAF-Key: <waf_mail_trusted_secret>` over
+# a loopback/unix connection -- in production that header comes from the mail
+# side's `auth_http_header X-WAF-Key "<token>"`. probe() therefore sends the key
+# by default (the "the mail proxy is talking to us" case); probe_nokey() and the
+# $BADKEY_* vectors drive the unauthenticated / spoofing cases.
 #
 # Geo-dependent edges (#6/#8) self-validate ground truth at runtime via the
 # oracle reference/geolookup.c against geodb/location.db; if the DB is absent or
@@ -37,6 +49,14 @@ SRC_CONF=$TESTS/heavybag-mailauth-fuzz.conf
 GEODB=$ROOT/geodb/location.db
 ELOG=$SBX/logs/error-mailauth.log
 
+# The shared secret baked into the rendered conf (waf_mail_trusted_secret) and
+# sent as X-WAF-Key by probe(). BADKEY_EQLEN is the same LENGTH as SECRET with
+# one differing byte -- it drives the constant-time compare's XOR loop rather
+# than its length short-circuit; BADKEY_SHORT drives the length mismatch.
+SECRET='hb-mailauth-shared-secret-2026'
+BADKEY_EQLEN='hb-mailauth-shared-secret-2027'
+BADKEY_SHORT='x'
+
 # non-loopback IPv4 for the #5 untrusted-peer vhosts (empty -> #5 SKIP).
 EXTIP=$(ip -4 route get 192.0.2.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)
 if [ -z "$EXTIP" ]; then
@@ -45,13 +65,15 @@ fi
 EXT_AVAIL=1
 if [ -z "$EXTIP" ]; then EXTIP=127.0.0.1; EXT_AVAIL=0; fi
 
-# portability: render the committed conf with the active ROOT + the detected
-# EXTIP (both seds are no-ops on the default root / when EXTIP is unused).
+# portability: render the committed conf with the active ROOT, the detected
+# EXTIP and the shared secret (the first two seds are no-ops on the default root
+# / when EXTIP is unused).
 HB_RENDER_DIR=$TESTS/corpus/.render
 mkdir -p "$HB_RENDER_DIR"
 CONF=$HB_RENDER_DIR/heavybag-mailauth-fuzz.conf
 sed -e "s#@HB_ROOT@#$ROOT#g" \
-    -e "s#__HB_EXTIP__#$EXTIP#g" "$SRC_CONF" > "$CONF"
+    -e "s#__HB_EXTIP__#$EXTIP#g" \
+    -e "s#__HB_SECRET__#$SECRET#g" "$SRC_CONF" > "$CONF"
 
 pass=0; fail=0; skip=0
 ok()   { echo "  PASS: $1"; pass=$((pass+1)); }
@@ -68,21 +90,38 @@ trap cleanup EXIT
 # Issue a mail auth_http probe to a port with the standard ngx_mail headers plus
 # whatever extra args (e.g. -H 'Client-IP: ...') the caller passes; echo the raw
 # response header block (CR stripped).
+#   probe        -- AUTHENTICATED caller (sends the correct X-WAF-Key), i.e. the
+#                   real mail proxy; this is what makes Client-IP authoritative
+#   probe_nokey  -- unauthenticated local caller (no X-WAF-Key at all)
 MU="-H Auth-Method:none -H Auth-Protocol:smtp -H Auth-SMTP-Helo:x -H Auth-SMTP-From:<a@b> -H Auth-SMTP-To:<c@d>"
+KEYH="-H X-WAF-Key:$SECRET"
 probe() {
+    local port=$1; shift
+    curl -s -D - -o /dev/null $MU $KEYH "$@" \
+        "http://127.0.0.1:$port/waf-mail-auth" 2>/dev/null | tr -d '\r'
+}
+probe_nokey() {
     local port=$1; shift
     curl -s -D - -o /dev/null $MU "$@" \
         "http://127.0.0.1:$port/waf-mail-auth" 2>/dev/null | tr -d '\r'
 }
-# probe a vhost bound on EXTIP (the #5 untrusted-peer vhosts).
+# probe a vhost bound on EXTIP (the #5 untrusted-peer vhosts); _key sends a
+# VALID X-WAF-Key to prove a remote caller gains nothing from holding the token.
 probe_ext() {
     local port=$1; shift
     curl -s -D - -o /dev/null $MU "$@" \
         "http://$EXTIP:$port/waf-mail-auth" 2>/dev/null | tr -d '\r'
 }
+probe_ext_key() {
+    local port=$1; shift
+    curl -s -D - -o /dev/null $MU $KEYH "$@" \
+        "http://$EXTIP:$port/waf-mail-auth" 2>/dev/null | tr -d '\r'
+}
 # extract the Auth-Status value (lowercased, leading ws trimmed) from headers.
 astat() { printf '%s' "$1" | grep -i '^Auth-Status:' | head -1 \
             | cut -d: -f2- | sed 's/^[[:space:]]*//' | tr 'A-Z' 'a-z'; }
+# read one counter out of the text /waf/stat rendering
+cval() { printf '%s\n' "$1" | awk -v k="$2" '$1==k {print $2; exit}'; }
 
 echo "=== WAF mail auth_http deep-fuzz harness ==="
 echo "    EXTIP=$EXTIP (avail=$EXT_AVAIL)  GEODB=$([ -f "$GEODB" ] && echo present || echo absent)"
@@ -126,8 +165,8 @@ echo
 
 # ============================================================================
 echo "================  #1 missing Client-IP -> fail-open  ================"
-# No Client-IP header at all: the handler logs a WARN and allows (never breaks
-# mail delivery). heavybag_authhttp.c:68-79.
+# No Client-IP header at all, from an AUTHENTICATED caller: the handler logs a
+# WARN and allows (never breaks mail delivery).
 r=$(probe 28601)
 [ "$(astat "$r")" = ok ] && ok "#1 missing Client-IP -> Auth-Status OK (fail-open)" \
     || bad "#1 missing Client-IP -> '$(astat "$r")' (want ok)"
@@ -177,7 +216,8 @@ rs=$(astat "$r")
 
 # ============================================================================
 echo "================  #4 multiple Client-IP headers -> first-wins  ======="
-# Two Client-IP headers: the FIRST is authoritative (heavybag_authhttp.c:311).
+# Two Client-IP headers: the FIRST is authoritative (the headers_in walk in
+# ngx_http_heavybag_authhttp_header() returns on the first case-insensitive hit).
 r=$(probe 28601 -H 'Client-IP: 203.0.113.7' -H 'Client-IP: 8.8.8.8')
 [ "$(astat "$r")" = 'static blocklist' ] \
     && ok "#4 [blocklisted, benign] -> first wins -> 'static blocklist'" \
@@ -192,6 +232,7 @@ echo "================  #5 untrusted-peer spoof -> Client-IP ignored  ======"
 if [ "$EXT_AVAIL" -eq 0 ]; then
     skp "#5a untrusted-peer spoof: no non-loopback IPv4 on this host"
     skp "#5b untrusted-peer blocklisted Client-IP ignored: no non-loopback IPv4"
+    skp "#5c remote peer WITH a valid X-WAF-Key: no non-loopback IPv4"
 else
     # #5a: peer (EXTIP) is blocklisted; a benign Client-IP must NOT save it.
     r=$(probe_ext 28607 -H 'Client-IP: 8.8.8.8')
@@ -203,6 +244,12 @@ else
     [ "$(astat "$r")" = ok ] \
         && ok "#5b untrusted peer + blocklisted Client-IP -> ignored -> OK" \
         || bad "#5b untrusted peer blocklisted-header -> '$(astat "$r")' (want ok)"
+    # #5c: holding a VALID token buys a remote caller nothing -- the loopback /
+    # unix peer-class filter is a necessary condition, not a replaceable one.
+    r=$(probe_ext_key 28607 -H 'Client-IP: 8.8.8.8')
+    [ "$(astat "$r")" = 'static blocklist' ] \
+        && ok "#5c remote peer WITH valid X-WAF-Key -> still peer-judged -> 'static blocklist'" \
+        || bad "#5c remote peer with valid key -> '$(astat "$r")' (want 'static blocklist')"
     sleep 0.2
     grep -q 'mail auth from untrusted peer' "$ELOG" \
         && ok "#5 untrusted-peer path logged the WARN" \
@@ -248,7 +295,7 @@ fi
 # ============================================================================
 echo "================  #7 missing waf_mail_backend -> allow w/o backend  =="
 # benign Client-IP: allowed, but no Auth-Server/Auth-Port (backend unset);
-# the handler logs an ERR (heavybag_authhttp.c:207-211) yet still returns OK.
+# the handler logs an ERR yet still returns OK.
 r=$(probe 28605 -H 'Client-IP: 8.8.8.8')
 as=$(astat "$r")
 has_srv=$(printf '%s' "$r" | grep -ci '^Auth-Server:')
@@ -291,9 +338,9 @@ fi
 
 # ============================================================================
 echo "================  #9 waf_mail_failopen off -> fail-CLOSED  ==========="
-# With waf_mail_failopen off, a missing / unparseable Client-IP from the
-# trusted loopback peer must DENY (the synthetic reason "mail client-ip
-# missing"), NOT fail open. heavybag_authhttp.c:68-90.
+# With waf_mail_failopen off, a missing / unparseable Client-IP from an
+# AUTHENTICATED caller must DENY (the synthetic reason "mail client-ip
+# missing"), NOT fail open.
 r=$(probe 28609)
 [ "$(astat "$r")" = 'mail client-ip missing' ] \
     && ok "#9 failopen-off + missing Client-IP -> deny 'mail client-ip missing'" \
@@ -316,6 +363,81 @@ r=$(probe 28609 -H 'Client-IP: 203.0.113.7')
 [ "$(astat "$r")" = 'static blocklist' ] \
     && ok "#9 failopen-off + blocklisted Client-IP -> 'static blocklist' (normal deny intact)" \
     || bad "#9 failopen-off + blocklisted Client-IP -> '$(astat "$r")' (want 'static blocklist')"
+# --- PIN THE ACTUAL DEFAULT (T4.c) ------------------------------------------
+# The partner decision (2026-08-28) is that waf_mail_failopen keeps its
+# fail-OPEN default. 28601 sets no waf_mail_failopen, so it runs on the merged
+# default: an authenticated caller with NO Client-IP must be ALLOWED. If anyone
+# silently flips ngx_conf_merge_value(conf->mail_failopen, ..., 1) to 0, this
+# assertion -- and only this assertion -- goes red and names the reason.
+r=$(probe 28601)
+[ "$(astat "$r")" = ok ] \
+    && ok "#9 DEFAULT waf_mail_failopen is ON (no directive + missing Client-IP -> OK)" \
+    || bad "#9 DEFAULT waf_mail_failopen appears FLIPPED: got '$(astat "$r")' (want ok = fail-open)"
+grep -q 'allowing (waf_mail_failopen on)' "$ELOG" \
+    && ok "#9 default fail-open logs it explicitly ('allowing (waf_mail_failopen on)')" \
+    || bad "#9 expected WARN 'allowing (waf_mail_failopen on)' not in log"
+
+# ============================================================================
+echo "================  #10 X-WAF-Key trust model (T4.d / SV11)  ==========="
+# mf-trust (28621) blocklists the LOOPBACK PEER itself, so the two trust
+# directions give opposite verdicts and neither can pass by accident.
+# #10a feature works: authenticated caller -> the forwarded IP is judged.
+r=$(probe 28621 -H 'Client-IP: 8.8.8.8')
+[ "$(astat "$r")" = ok ] \
+    && ok "#10a correct X-WAF-Key + Client-IP 8.8.8.8 -> forwarded IP judged -> OK" \
+    || bad "#10a authenticated forward -> '$(astat "$r")' (want ok; the feature is broken)"
+# #10b evasion closed: NO key -> the header is ignored, the real peer is judged.
+r=$(probe_nokey 28621 -H 'Client-IP: 8.8.8.8')
+[ "$(astat "$r")" = 'static blocklist' ] \
+    && ok "#10b MISSING X-WAF-Key -> Client-IP IGNORED, real peer judged -> 'static blocklist'" \
+    || bad "#10b missing key -> '$(astat "$r")' (want 'static blocklist'; SPOOF ACCEPTED)"
+# #10b2 wrong key, SAME LENGTH as the secret (drives the constant-time XOR loop).
+r=$(probe_nokey 28621 -H "X-WAF-Key: $BADKEY_EQLEN" -H 'Client-IP: 8.8.8.8')
+[ "$(astat "$r")" = 'static blocklist' ] \
+    && ok "#10b2 wrong X-WAF-Key (equal length) -> Client-IP ignored -> 'static blocklist'" \
+    || bad "#10b2 equal-length wrong key -> '$(astat "$r")' (want 'static blocklist')"
+# #10b3 wrong key, DIFFERENT length (drives the length short-circuit).
+r=$(probe_nokey 28621 -H "X-WAF-Key: $BADKEY_SHORT" -H 'Client-IP: 8.8.8.8')
+[ "$(astat "$r")" = 'static blocklist' ] \
+    && ok "#10b3 wrong X-WAF-Key (short) -> Client-IP ignored -> 'static blocklist'" \
+    || bad "#10b3 short wrong key -> '$(astat "$r")' (want 'static blocklist')"
+# #10c fail-closed default: mf-nosecret (28622) configures NO secret, so even a
+# "correct" key cannot make Client-IP authoritative.
+r=$(probe 28622 -H 'Client-IP: 8.8.8.8')
+[ "$(astat "$r")" = 'static blocklist' ] \
+    && ok "#10c no waf_mail_trusted_secret -> Client-IP never trusted -> peer judged (fail-closed)" \
+    || bad "#10c unconfigured secret -> '$(astat "$r")' (want 'static blocklist'; NOT fail-closed)"
+sleep 0.2
+grep -q 'waf_mail_trusted_secret is not configured' "$ELOG" \
+    && ok "#10c unconfigured-secret path logged the actionable WARN" \
+    || bad "#10c expected WARN 'waf_mail_trusted_secret is not configured' not in log"
+grep -q 'X-WAF-Key missing' "$ELOG" \
+    && ok "#10b missing-key path logged 'X-WAF-Key missing'" \
+    || bad "#10b expected WARN 'X-WAF-Key missing' not in log"
+grep -q 'X-WAF-Key mismatched' "$ELOG" \
+    && ok "#10b2 wrong-key path logged 'X-WAF-Key mismatched'" \
+    || bad "#10b2 expected WARN 'X-WAF-Key mismatched' not in log"
+
+# ============================================================================
+echo "================  #11 allowlist bypasses the rate stage (T4.b)  ======"
+# mf-allowrate (28623): rate=1r/m burst=1. 198.51.100.9 is allowlisted, so with
+# the default waf_allowlist_scope full the rate stage is skipped entirely and a
+# trusted relay cannot throttle itself; .10 is the non-allowlisted control.
+a1=$(probe 28623 -H 'Client-IP: 198.51.100.9')
+a2=$(probe 28623 -H 'Client-IP: 198.51.100.9')
+a3=$(probe 28623 -H 'Client-IP: 198.51.100.9')
+if [ "$(astat "$a1")" = ok ] && [ "$(astat "$a2")" = ok ] && [ "$(astat "$a3")" = ok ]; then
+    ok "#11 allowlisted peer + exhausted bucket -> all 3 OK (rate stage skipped)"
+else
+    bad "#11 allowlisted peer throttled: '$(astat "$a1")' '$(astat "$a2")' '$(astat "$a3")' (want ok ok ok)"
+fi
+c1=$(probe 28623 -H 'Client-IP: 198.51.100.10')
+c2=$(probe 28623 -H 'Client-IP: 198.51.100.10')
+if [ "$(astat "$c1")" = ok ] && [ "$(astat "$c2")" = 'rate limit' ]; then
+    ok "#11 non-allowlisted control -> req1 OK, req2 'rate limit' (enforce-always intact)"
+else
+    bad "#11 non-allowlisted control: c1='$(astat "$c1")' c2='$(astat "$c2")' (want ok, rate limit)"
+fi
 
 # ============================================================================
 echo "================  worker liveness + error.log clean  ================"
@@ -323,6 +445,44 @@ echo "================  worker liveness + error.log clean  ================"
 r=$(probe 28601 -H 'Client-IP: 8.8.8.8')
 [ "$(astat "$r")" = ok ] && ok "worker alive after fuzz barrage (clean request -> OK)" \
     || bad "worker not serving after fuzz -> '$(astat "$r")'"
+
+# ============================================================================
+echo "================  #12 counter invariant (observability-01 / T4.a)  ==="
+# Every vhost in this config runs `waf off`, so the HTTP PREACCESS handler never
+# counts anything: every counter below was moved by the MAIL head. The exported
+# invariant requests_total == allowed + sum(http_blocked_*) must hold across the
+# whole run -- mixed allow / rate-deny / reputation-deny. Before T4.a a mail
+# rate-deny bumped http_blocked[RATE_LIMIT] without ever bumping requests_total
+# (and reputation denies were invisible), so this sum could not balance.
+#
+# The two edges that reach NO verdict -- fail-open (#1/#2) and fail-closed (#9)
+# on an unparseable Client-IP -- are deliberately outside the accounting, so
+# they cannot skew either side.
+st=$(curl -s "http://127.0.0.1:28624/waf/stat" 2>/dev/null)
+tot=$(cval "$st" http_requests_total)
+alw=$(cval "$st" http_allowed)
+blk=$(printf '%s\n' "$st" | awk 'index($1,"http_blocked_")==1 {s+=$2} END {print s+0}')
+bl_list=$(cval "$st" http_blocked_blocklist)
+bl_rate=$(cval "$st" http_blocked_rate_limit)
+echo "    /waf/stat: requests_total=$tot allowed=$alw blocked_sum=$blk (blocklist=$bl_list rate_limit=$bl_rate)"
+if [ -z "$tot" ] || [ -z "$alw" ]; then
+    bad "#12 /waf/stat did not render http_requests_total / http_allowed"
+elif [ "$tot" -eq 0 ]; then
+    bad "#12 http_requests_total is 0 -- the mail head moved no counter at all"
+elif [ "$tot" -eq $((alw + blk)) ]; then
+    ok "#12 invariant holds: requests_total=$tot == allowed=$alw + blocked_sum=$blk"
+else
+    bad "#12 invariant BROKEN: requests_total=$tot != allowed=$alw + blocked_sum=$blk"
+fi
+# the specific regression #5 called out: mail reputation blocks must be visible.
+[ -n "$bl_list" ] && [ "$bl_list" -gt 0 ] \
+    && ok "#12 mail reputation blocks are visible (http_blocked_blocklist=$bl_list)" \
+    || bad "#12 http_blocked_blocklist=$bl_list -- mail rep-blocks still invisible"
+[ -n "$bl_rate" ] && [ "$bl_rate" -gt 0 ] \
+    && ok "#12 mail rate denies still booked (http_blocked_rate_limit=$bl_rate)" \
+    || bad "#12 http_blocked_rate_limit=$bl_rate -- mail rate denies not booked"
+
+# ============================================================================
 if grep -Ei '\[crit\]|\[alert\]|\[emerg\]|segfault|worker process [0-9]+ exited' "$ELOG" >/tmp/mf_errs 2>/dev/null; [ -s /tmp/mf_errs ]; then
     echo "  --- suspicious error.log lines:"; sed 's/^/      /' /tmp/mf_errs
     bad "error.log has crash/abort lines"

@@ -315,14 +315,6 @@ ngx_http_heavybag_ja4_build(const uint16_t *ciphers, size_t n_ciphers,
 #if (NGX_HTTP_SSL)
 
 
-/* GREASE test, duplicated here so the extractor needs no core helper. */
-static int
-ja4_compute_is_grease(uint16_t v)
-{
-    return (v & 0x0f0f) == 0x0a0a;
-}
-
-
 /*
  * Extract the ClientHello fields off *ssl and build the JA4 into *out, with
  * out->data from *pool (connection-scoped, freed with the connection). Every
@@ -380,7 +372,7 @@ ngx_http_heavybag_ja4_compute(SSL *ssl, ngx_pool_t *pool, ngx_str_t *out)
         hi = 0;
         for (i = 1; i + 1 < end; i += 2) {
             v = (uint16_t) ((p[i] << 8) | p[i + 1]);
-            if (ja4_compute_is_grease(v)) {
+            if (ja4_is_grease(v)) {
                 continue;
             }
             if (v > hi) {

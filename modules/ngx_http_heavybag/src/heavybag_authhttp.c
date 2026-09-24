@@ -1,11 +1,41 @@
 /*
  * ngx_http_heavybag_module - SMTP auth_http endpoint
  *
- * See heavybag_authhttp.h. The mail proxy puts the real peer in the Client-IP
- * header (no upstream content, not spoofable); we run the same verdict
- * function the HTTP PREACCESS phase uses and translate the result into the
- * response headers ngx_mail_auth_http_module expects. The response is a
- * header-only 200; ngx_mail ignores the status line and parses Auth-*.
+ * See heavybag_authhttp.h. The mail proxy forwards the real session peer in
+ * the Client-IP header; we run the same verdict function the HTTP PREACCESS
+ * phase uses and translate the result into the response headers
+ * ngx_mail_auth_http_module expects. The response is a header-only 200;
+ * ngx_mail ignores the status line and parses Auth-*.
+ *
+ * TRUST MODEL (SV11, CWE-290/348). Client-IP is attacker-controlled input
+ * unless the CALLER is authenticated. The host may run other local processes,
+ * so "the peer is loopback" is a topology filter, NOT an authenticator: any
+ * co-located process can connect() and forge a Client-IP to pick its own
+ * verdict, which is a WAF-evasion primitive. The forwarded address is
+ * therefore honoured only when BOTH hold:
+ *
+ *   (1) the peer is loopback / AF_UNIX  -- the cheap first filter, and
+ *   (2) the request carries X-WAF-Key whose value CONSTANT-TIME-equals the
+ *       configured waf_mail_trusted_secret (the actual authenticator).
+ *
+ * Everything else -- no secret configured, header missing, value mismatched,
+ * remote peer -- is fail-CLOSED: Client-IP is ignored and the real connection
+ * peer is judged. The operator wires the mail side up with
+ * `auth_http_header X-WAF-Key "<token>";` so ngx_mail attaches it to every
+ * auth request.
+ *
+ * ACCOUNTING (observability-01). The mail head is a first-class citizen of the
+ * exported invariant requests_total == allowed + sum(blocked), documented at
+ * ngx_http_heavybag_module.c:747-752. It REUSES the http_* counters (no
+ * segregated mail_* fields, no serializer change, no shm layout bump): every
+ * auth request that reaches a verdict bumps http_requests_total once, then
+ * exactly one of http_allowed / http_blocked[reason]. The two edges that
+ * never reach a verdict -- a missing / unparseable Client-IP on an
+ * authenticated channel, resolved by waf_mail_failopen -- are deliberately
+ * OUTSIDE the accounting: there is no reason slot for "not judged" and adding
+ * one would bump the shm layout. Those edges are WARN-logged instead. The
+ * auth_http location runs with `waf off`, so the HTTP PREACCESS handler never
+ * counts these requests a second time.
  */
 
 #include "ngx_http_heavybag.h"
@@ -17,8 +47,13 @@
 
 static ngx_table_elt_t *ngx_http_heavybag_add_header(ngx_http_request_t *r,
     const char *key, size_t klen, u_char *val, size_t vlen);
-static ngx_str_t *ngx_http_heavybag_client_ip(ngx_http_request_t *r);
+static ngx_str_t *ngx_http_heavybag_authhttp_header(ngx_http_request_t *r,
+    const char *name, size_t nlen);
+static ngx_uint_t ngx_http_heavybag_authhttp_secret_eq(ngx_str_t *a,
+    ngx_str_t *b);
 static ngx_uint_t ngx_http_heavybag_authhttp_peer_trusted(ngx_connection_t *c);
+static ngx_uint_t ngx_http_heavybag_authhttp_caller_trusted(
+    ngx_http_request_t *r, ngx_http_heavybag_loc_conf_t *wlcf);
 static ngx_int_t ngx_http_heavybag_authhttp_finalize(ngx_http_request_t *r);
 static ngx_int_t ngx_http_heavybag_authhttp_allow(ngx_http_request_t *r,
     ngx_http_heavybag_loc_conf_t *wlcf);
@@ -53,17 +88,20 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
     }
 
     wlcf = ngx_http_get_module_loc_conf(r, ngx_http_heavybag_module);
+    wmcf = ngx_http_get_module_main_conf(r, ngx_http_heavybag_module);
+    sh = (wmcf->stat_zone != NULL) ? wmcf->stat_zone->data : NULL;
 
     /*
-     * The mail proxy reaches this endpoint over loopback and puts the real
-     * peer in Client-IP. Only honour that header when the request actually
-     * came from a trusted (loopback / unix) peer; otherwise the endpoint has
-     * been exposed and Client-IP is attacker-spoofable, so judge the real
-     * connection peer instead. (The location should also carry "waf off".)
+     * Whose address do we judge? Only an AUTHENTICATED caller (loopback/unix
+     * peer AND a matching X-WAF-Key) may dictate it through Client-IP; every
+     * other caller is judged on the connection peer it actually came from.
+     * See the trust-model note at the top of this file. (The location should
+     * also carry "waf off".)
      */
-    if (ngx_http_heavybag_authhttp_peer_trusted(r->connection)) {
+    if (ngx_http_heavybag_authhttp_caller_trusted(r, wlcf)) {
 
-        client_ip = ngx_http_heavybag_client_ip(r);
+        client_ip = ngx_http_heavybag_authhttp_header(r, "Client-IP",
+                                                      sizeof("Client-IP") - 1);
 
         if (client_ip == NULL
             || ngx_parse_addr(r->pool, &addr, client_ip->data, client_ip->len)
@@ -71,11 +109,20 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
         {
             /*
              * ngx_mail always sets Client-IP from the real peer, so a missing
-             * or unparseable value means a malformed or external request.
-             * waf_mail_failopen on (default): fail OPEN (allow) rather than
-             * break mail delivery, but log it. off: fail CLOSED (deny) for an
-             * operator who would rather drop an unattributable auth than risk
-             * letting it through unjudged.
+             * or unparseable value on an AUTHENTICATED channel means a
+             * malformed request.
+             *
+             * waf_mail_failopen on -- THE DEFAULT (partner decision,
+             * 2026-08-28): fail OPEN. Consequence, stated plainly: this auth
+             * request is ALLOWED WITHOUT ANY WAF JUDGEMENT -- no reputation
+             * check, no rate limit -- so that a malformed header can never
+             * break mail delivery. It is WARN-logged, and (see the accounting
+             * note at the top of this file) not counted. The evasion vector
+             * this used to open is already closed by the shared-secret trust
+             * model above: an unauthenticated local process cannot reach this
+             * branch at all, it is judged on its own peer address instead.
+             * off: fail CLOSED (deny) for an operator who would rather drop an
+             * unattributable auth than risk letting it through unjudged.
              */
             if (wlcf->mail_failopen) {
                 ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
@@ -94,10 +141,19 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
         sa = addr.sockaddr;
 
     } else {
-        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
-                      "heavybag: mail auth from untrusted peer, ignoring Client-IP "
-                      "and judging the connection peer");
+        /* not authenticated: the helper already logged the specific reason */
         sa = r->connection->sockaddr;
+    }
+
+    /*
+     * observability-01: from here on this auth request reaches exactly one
+     * verdict (allow or deny), so count it once -- the mail head keeps the
+     * exported invariant requests_total == allowed + sum(blocked) true, using
+     * the existing http_* counters. There is no per-vhost slot for the mail
+     * head, so only the globals move.
+     */
+    if (sh != NULL) {
+        (void) ngx_atomic_fetch_add(&sh->http_requests_total, 1);
     }
 
     /*
@@ -108,6 +164,11 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
     rc = ngx_http_heavybag_reputation_check(&wlcf->rep, sa, &reason, &verdict);
 
     if (rc != NGX_DECLINED) {
+        /* book the deny under its reason so rep-blocks stop being invisible */
+        if (sh != NULL) {
+            (void) ngx_atomic_fetch_add(&sh->http_blocked[verdict.reason], 1);
+        }
+
         if (client_ip != NULL) {
             ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                           "heavybag: mail reputation block %V (%V)",
@@ -120,6 +181,22 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
     }
 
     /*
+     * Allowlist full-scope bypass -- lifecycle-v01 parity with the HTTP head
+     * (ngx_http_heavybag_module.c:1044-1048). A waf_allowlist CIDR hit returns
+     * DECLINED with reason ALLOWLIST; with waf_allowlist_scope full (the
+     * default) that trusted address skips EVERY later stage, so a trusted mail
+     * relay is never throttled by its own auth traffic ("trusted == trusted")
+     * and an allowlisted, geo-less IP stays out of the default rate bucket.
+     * With scope reputation only the reputation stage is exempted and the rate
+     * bucket still applies. (#3 / SV9, CWE-284)
+     */
+    if (verdict.reason == HEAVYBAG_REASON_ALLOWLIST
+        && wlcf->allowlist_scope == HEAVYBAG_ALLOWLIST_FULL)
+    {
+        goto allowed;
+    }
+
+    /*
      * Reputation allowed: per-IP rate limit. No detect mode here (the auth
      * endpoint always enforces). The mail head has no per-vhost slot, so a
      * rate deny is booked on the global http_blocked[RATE_LIMIT] + http_resp_429
@@ -129,7 +206,6 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
         rate_rule = ngx_http_heavybag_rate_rule_select(wlcf->rate_rules, &verdict);
 
         if (rate_rule != NULL) {
-            wmcf = ngx_http_get_module_main_conf(r, ngx_http_heavybag_module);
 
             if (ngx_http_heavybag_rate_check(
                     (wmcf->rate_zone != NULL) ? wmcf->rate_zone->data : NULL,
@@ -139,7 +215,6 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
             {
                 ngx_str_t  rl = ngx_string("rate limit");
 
-                sh = (wmcf->stat_zone != NULL) ? wmcf->stat_zone->data : NULL;
                 if (sh != NULL) {
                     (void) ngx_atomic_fetch_add(
                         &sh->http_blocked[HEAVYBAG_REASON_RATE_LIMIT], 1);
@@ -154,14 +229,124 @@ ngx_http_heavybag_authhttp_handler(ngx_http_request_t *r)
         }
     }
 
+allowed:
+
+    /* the other half of the invariant: exactly one allowed per counted request */
+    if (sh != NULL) {
+        (void) ngx_atomic_fetch_add(&sh->http_allowed, 1);
+        if (verdict.reason == HEAVYBAG_REASON_ALLOWLIST) {
+            (void) ngx_atomic_fetch_add(&sh->http_allowlist_hits, 1);
+        }
+    }
+
     return ngx_http_heavybag_authhttp_allow(r, wlcf);
 }
 
 
 /*
- * Is the request peer trusted to dictate Client-IP? In this edge-firewall
- * topology the mail proxy reaches auth_http over loopback (or a unix socket),
- * so only those peers may set the address we judge.
+ * Constant-time equality of two byte strings.
+ *
+ * DO NOT "optimize" this into memcmp / ngx_strcmp / ngx_strncmp / strcmp: it
+ * compares a caller-supplied X-WAF-Key against the configured
+ * waf_mail_trusted_secret, and every one of those primitives returns on the
+ * first differing byte, which leaks the secret prefix-by-prefix through
+ * response timing (CWE-208). The loop below always touches every byte of an
+ * equal-length pair and folds the differences into one accumulator, so its
+ * running time depends on the LENGTH only, never on the contents.
+ *
+ * A length mismatch short-circuits: the length of a secret is not itself a
+ * secret, and comparing unequal lengths byte-wise is meaningless. An empty
+ * secret never matches -- an unconfigured token must not authenticate anyone.
+ */
+static ngx_uint_t
+ngx_http_heavybag_authhttp_secret_eq(ngx_str_t *a, ngx_str_t *b)
+{
+    size_t  i;
+    u_char  diff;
+
+    if (a->len == 0 || a->len != b->len) {
+        return 0;
+    }
+
+    diff = 0;
+
+    for (i = 0; i < a->len; i++) {
+        diff |= (u_char) (a->data[i] ^ b->data[i]);
+    }
+
+    return (diff == 0) ? 1 : 0;
+}
+
+
+/*
+ * Is the CALLER authenticated to dictate the address we judge (Client-IP)?
+ *
+ * Two conjunctive conditions, cheapest first (see the trust-model note at the
+ * top of this file): the peer must be loopback / AF_UNIX, AND the request must
+ * carry an X-WAF-Key that constant-time-matches waf_mail_trusted_secret. The
+ * secret -- not the peer class -- is the authenticator; the peer test alone is
+ * passed by any co-located process (SV11).
+ *
+ * Fail-closed by construction: every failure path returns 0, and the caller
+ * then judges the real connection peer. Each path logs its own specific reason
+ * so an operator can tell a config gap from a spoof attempt.
+ */
+static ngx_uint_t
+ngx_http_heavybag_authhttp_caller_trusted(ngx_http_request_t *r,
+    ngx_http_heavybag_loc_conf_t *wlcf)
+{
+    ngx_str_t  *key;
+
+    /*
+     * No secret configured -> nobody can ever be authenticated -> Client-IP is
+     * never honoured. Logged loudly because it is a config gap the operator
+     * has to close (waf_mail_trusted_secret here + auth_http_header X-WAF-Key
+     * on the mail side), not a transient condition.
+     */
+    if (wlcf->mail_trusted_secret.len == 0) {
+        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                      "heavybag: mail auth Client-IP not trusted: "
+                      "waf_mail_trusted_secret is not configured (fail-closed)");
+        return 0;
+    }
+
+    if (!ngx_http_heavybag_authhttp_peer_trusted(r->connection)) {
+        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                      "heavybag: mail auth from untrusted peer, ignoring Client-IP "
+                      "and judging the connection peer");
+        return 0;
+    }
+
+    key = ngx_http_heavybag_authhttp_header(r, "X-WAF-Key",
+                                            sizeof("X-WAF-Key") - 1);
+
+    if (key == NULL) {
+        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                      "heavybag: mail auth X-WAF-Key missing, ignoring "
+                      "Client-IP and judging the connection peer");
+        return 0;
+    }
+
+    if (!ngx_http_heavybag_authhttp_secret_eq(key,
+                                              &wlcf->mail_trusted_secret))
+    {
+        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                      "heavybag: mail auth X-WAF-Key mismatched, ignoring "
+                      "Client-IP and judging the connection peer");
+        return 0;
+    }
+
+    return 1;
+}
+
+
+/*
+ * Is the request peer of the right class to be the mail proxy? In this
+ * edge-firewall topology the mail proxy reaches auth_http over loopback (or a
+ * unix socket), so a remote peer is disqualified outright. NECESSARY BUT NOT
+ * SUFFICIENT: this only narrows the candidate set to local processes -- the
+ * shared secret checked by _caller_trusted() above is what actually
+ * authenticates the caller.
  */
 static ngx_uint_t
 ngx_http_heavybag_authhttp_peer_trusted(ngx_connection_t *c)
@@ -309,9 +494,16 @@ ngx_http_heavybag_add_header(ngx_http_request_t *r, const char *key, size_t klen
 }
 
 
-/* Locate the Client-IP request header (not a standard slot). */
+/*
+ * Locate a non-standard request header by name (Client-IP / X-WAF-Key have no
+ * dedicated headers_in slot, so the list has to be walked). Case-insensitive;
+ * the FIRST occurrence wins, which is what makes a duplicated Client-IP
+ * deterministic. Returns a pointer into the request's own header list --
+ * borrowed, never copied, valid for the life of the request.
+ */
 static ngx_str_t *
-ngx_http_heavybag_client_ip(ngx_http_request_t *r)
+ngx_http_heavybag_authhttp_header(ngx_http_request_t *r, const char *name,
+    size_t nlen)
 {
     ngx_uint_t        i;
     ngx_list_part_t  *part;
@@ -331,10 +523,8 @@ ngx_http_heavybag_client_ip(ngx_http_request_t *r)
             i = 0;
         }
 
-        if (h[i].key.len == sizeof("Client-IP") - 1
-            && ngx_strncasecmp(h[i].key.data, (u_char *) "Client-IP",
-                               sizeof("Client-IP") - 1)
-               == 0)
+        if (h[i].key.len == nlen
+            && ngx_strncasecmp(h[i].key.data, (u_char *) name, nlen) == 0)
         {
             return &h[i].value;
         }

@@ -98,11 +98,90 @@ typedef struct {
 } ngx_http_heavybag_rate_slot_t;
 
 
+/*
+ * Zone header. `layout` comes FIRST, mirroring the status zone
+ * (heavybag_status.h:100), so the signature is the first word a re-attaching
+ * worker reads; the 4 bytes of padding behind it keep rate_overflow -- and
+ * with it sizeof(hdr) and the `hdr + 1` slot base -- 8-byte aligned, which the
+ * packed atomic slot CAS requires.
+ */
 typedef struct {
+    uint32_t      layout;          /* HEAVYBAG_RATE_SHM_LAYOUT signature    */
     ngx_atomic_t  rate_overflow;   /* eviction-CAS failures (saturation)   */
     ngx_uint_t    nslots;          /* length of the trailing slot array     */
     /* ngx_http_heavybag_rate_slot_t slots[nslots] follow, contiguous */
 } ngx_http_heavybag_rate_hdr_t;
+
+
+/*
+ * Layout signature: stamped into every fresh segment and verified before a
+ * persisted one is adopted (ngx_http_heavybag_rate_hdr_valid). Built exactly
+ * like the status zone's HEAVYBAG_STAT_SHM_LAYOUT (heavybag_status.h:145): a
+ * magic word XORed with the two struct sizes that DEFINE the memory layout --
+ * the header size (where the slot table starts) and the slot size (its
+ * stride) -- the latter shifted so swapping the two sizes cannot cancel out.
+ * Any field add/reorder that changes either sizeof bumps the signature by
+ * construction; bump the MAGIC by hand for a same-size field reorder.
+ *
+ * nslots is deliberately NOT part of the word: it is a runtime property of the
+ * zone size AND of the slab back-off loop in the init below, so it cannot be
+ * recomputed at re-attach time. It is validated separately, against the number
+ * of mapped bytes that actually follow the header.
+ */
+#define HEAVYBAG_RATE_SHM_MAGIC   0x48425231u   /* "HBR1" */
+#define HEAVYBAG_RATE_SHM_LAYOUT                                              \
+    ((uint32_t) HEAVYBAG_RATE_SHM_MAGIC                                       \
+     ^ (uint32_t) sizeof(ngx_http_heavybag_rate_hdr_t)                        \
+     ^ ((uint32_t) sizeof(ngx_http_heavybag_rate_slot_t) << 16))
+
+
+/*
+ * Is *hdr a slot table this build may safely index? `avail` is the number of
+ * mapped bytes from hdr to the end of the shm segment.
+ *
+ * Pure (no nginx, no logging -- the caller logs) so the predicate is unit
+ * testable over a fake header. It is the ONLY thing standing between a
+ * persisted segment written by a different build and ngx_http_heavybag_rate_check,
+ * which trusts hdr->nslots as its single modulo/index bound: a desynced nslots
+ * (or a shifted layout) turns every probe into an out-of-bounds read and every
+ * claim/evict CAS into an out-of-bounds write. Fail closed.
+ */
+static ngx_inline ngx_int_t
+ngx_http_heavybag_rate_hdr_valid(const ngx_http_heavybag_rate_hdr_t *hdr,
+    size_t avail)
+{
+    if (hdr == NULL) {
+        return NGX_ERROR;
+    }
+
+    /*
+     * Size FIRST, dereference second. The caller only proves that hdr itself
+     * points inside the segment, not that a whole header fits from there, so
+     * reading hdr->layout before this check could over-read the mapping by a
+     * few bytes -- the exact bug class this predicate exists to close.
+     */
+    if (avail <= sizeof(*hdr)) {
+        return NGX_ERROR;       /* not even room for the header itself */
+    }
+
+    if (hdr->layout != HEAVYBAG_RATE_SHM_LAYOUT) {
+        return NGX_ERROR;       /* other build / never stamped / garbage */
+    }
+
+    if (hdr->nslots < HEAVYBAG_RATE_MIN_SLOTS) {
+        return NGX_ERROR;       /* no init ever produces a smaller table */
+    }
+
+    /* width-independent, cannot overflow (division, not multiplication): the
+     * whole trailing slots[] must live inside the mapped segment */
+    if ((size_t) hdr->nslots
+        > (avail - sizeof(*hdr)) / sizeof(ngx_http_heavybag_rate_slot_t))
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
 
 
 /*
@@ -519,6 +598,7 @@ ngx_http_heavybag_rate_rule_add(ngx_conf_t *cf, ngx_array_t **rules)
 ngx_int_t
 ngx_http_heavybag_rate_init_zone(ngx_shm_zone_t *shm_zone, void *data)
 {
+    u_char                   *base;
     size_t                    alloc, margin;
     ngx_uint_t                n, pages;
     ngx_slab_pool_t          *shpool;
@@ -528,15 +608,42 @@ ngx_http_heavybag_rate_init_zone(ngx_shm_zone_t *shm_zone, void *data)
     shpool = (ngx_slab_pool_t *) shm_zone->shm.addr;
 
     /* reload: reuse the previous cycle's table verbatim. The token state stays
-     * in the slab, so live limits are NOT reset across a reload (desirable). */
+     * in the slab, so live limits are NOT reset across a reload (desirable).
+     * No layout check on this arm: `data` is the previous cycle of this same
+     * running binary, so the signature is the identical compile-time constant.
+     * Only the shm.exists arm below can adopt a segment laid out by a
+     * DIFFERENT build. */
     if (ohdr != NULL) {
         shm_zone->data = ohdr;
         return NGX_OK;
     }
 
-    /* worker re-attach to an existing segment */
+    /*
+     * Worker re-attach to an existing segment. A persisted shm (a Windows /
+     * SysV segment can outlive the process that created it) may have been laid
+     * out by another build, so adopt it only after the layout signature and
+     * the nslots-vs-mapped-size invariant both check out -- rate_check uses
+     * hdr->nslots as its sole index bound, so a desynced header is an OOB read
+     * plus an OOB CAS write on every request. Fail closed.
+     */
     if (shm_zone->shm.exists) {
-        shm_zone->data = shpool->data;
+        base = shm_zone->shm.addr;
+        hdr = shpool->data;
+
+        if (hdr == NULL
+            || (u_char *) hdr < base
+            || (u_char *) hdr >= base + shm_zone->shm.size
+            || ngx_http_heavybag_rate_hdr_valid(hdr,
+                   (size_t) (base + shm_zone->shm.size - (u_char *) hdr))
+               != NGX_OK)
+        {
+            ngx_log_error(NGX_LOG_EMERG, shm_zone->shm.log, 0,
+                          "heavybag: rate zone layout changed or stale on "
+                          "re-attach; a full restart is required for waf_rate");
+            return NGX_ERROR;
+        }
+
+        shm_zone->data = hdr;
         return NGX_OK;
     }
 
@@ -580,6 +687,7 @@ ngx_http_heavybag_rate_init_zone(ngx_shm_zone_t *shm_zone, void *data)
     }
 
     ngx_memzero(hdr, alloc);
+    hdr->layout = HEAVYBAG_RATE_SHM_LAYOUT;   /* checked by every re-attach */
     hdr->nslots = n;
 
     shpool->data = hdr;

@@ -137,6 +137,14 @@ typedef struct {
     ngx_str_t                      mail_backend_addr; /* waf_mail_backend ip  */
     ngx_str_t                      mail_backend_port; /* waf_mail_backend port*/
 
+    /* waf_mail_trusted_secret <token>: the shared secret that authenticates
+     * the mail proxy on the auth_http channel (the operator mirrors it with
+     * `auth_http_header X-WAF-Key "<token>"` on the mail side). Empty -- the
+     * default -- means the forwarded Client-IP is NEVER trusted and the real
+     * connection peer is judged instead: fail-closed by construction.
+     * (SV11, CWE-290/348; see heavybag_authhttp.c's trust-model note.) */
+    ngx_str_t                      mail_trusted_secret;
+
     /* JA4 fingerprint -> coarse TLS family table (waf_ja4_list <path>).
      * Sorted ngx_array_t of ngx_http_heavybag_ja4_entry_t, bsearch'd at runtime.
      * NULL = unconfigured -> ja4_family() yields UNKNOWN -> no JA4 spoof

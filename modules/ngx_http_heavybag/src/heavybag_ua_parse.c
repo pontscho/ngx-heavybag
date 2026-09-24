@@ -128,6 +128,15 @@ static ngx_str_t  heavybag_vendor_str[] = {
  * Returns a pointer into hay at the match start, or NULL. Never reads past
  * hay + hlen -- safe on non-NUL-terminated buffers and on binary/oversized
  * UA values.
+ *
+ * The scan is deliberately the naive O(hlen x nlen) one, with no length clamp
+ * ahead of the ~119 probes a full parse runs. This is a reviewed decision, not
+ * an oversight: the UA is bounded by the per-header buffer, which defaults to
+ * 8k, and at that size the whole probe set is sub-millisecond per request. It
+ * would only become materially costly if an operator raised the per-header
+ * buffer to multi-megabyte sizes; hardening it (an early UA-length clamp, or a
+ * memmem/Boyer-Moore primitive) is tracked as SV21 (LOW, CWE-407) and is
+ * deferred until such a configuration is actually in scope.
  */
 static const u_char *
 heavybag_ua_find(const u_char *hay, size_t hlen, const char *needle, size_t nlen)
@@ -325,9 +334,21 @@ heavybag_ua_try_browser(const u_char *ua, size_t n, ngx_http_heavybag_ua_os_e os
     if (HEAVYBAG_HAS(ua, n, "FxiOS/"))   { HEAVYBAG_VER(ua, n, "FxiOS/", vs, vl);   return HEAVYBAG_BROWSER_FIREFOX; }
 
     /* --- Chrome family (derivatives already excluded above) ---------- */
-    if (HEAVYBAG_HAS(ua, n, "Chrome") && HEAVYBAG_HAS(ua, n, "wv")) { return HEAVYBAG_BROWSER_CHROME; } /* webview */
-    if (HEAVYBAG_HAS(ua, n, "Silk/"))          { HEAVYBAG_VER(ua, n, "Silk/", vs, vl);          return HEAVYBAG_BROWSER_SILK; }
     if (HEAVYBAG_HAS(ua, n, "HeadlessChrome/")) { HEAVYBAG_VER(ua, n, "HeadlessChrome/", vs, vl); return HEAVYBAG_BROWSER_HEADLESSCHROME; }
+    /*
+     * Android WebView. Anchored to the real platform token "; wv)" (as emitted
+     * inside the Android comment block, e.g. "(Linux; Android 13; wv)"): the
+     * former bare "wv" substring matched incidental bytes ANYWHERE in the UA and
+     * -- because it sat first in this block -- also swallowed HeadlessChrome,
+     * hence the HeadlessChrome/ probe above. The embedding app exposes no
+     * version of its own, so the Chrome/ version is still sliced: the verdict is
+     * chrome WITH its Chrome version, not a versionless chrome.
+     */
+    if (HEAVYBAG_HAS(ua, n, "Chrome") && HEAVYBAG_HAS(ua, n, "; wv)")) {
+        HEAVYBAG_VER(ua, n, "Chrome/", vs, vl);
+        return HEAVYBAG_BROWSER_CHROME;
+    }
+    if (HEAVYBAG_HAS(ua, n, "Silk/"))          { HEAVYBAG_VER(ua, n, "Silk/", vs, vl);          return HEAVYBAG_BROWSER_SILK; }
     if (HEAVYBAG_HAS(ua, n, "CriOS/"))         { HEAVYBAG_VER(ua, n, "CriOS/", vs, vl);         return HEAVYBAG_BROWSER_CHROME; }
     if (HEAVYBAG_HAS(ua, n, "Chrome/"))        { HEAVYBAG_VER(ua, n, "Chrome/", vs, vl);        return HEAVYBAG_BROWSER_CHROME; }
 
@@ -356,7 +377,7 @@ heavybag_ua_try_browser(const u_char *ua, size_t n, ngx_http_heavybag_ua_os_e os
 
     /* --- non-browser clients / tools --------------------------------- */
     if (HEAVYBAG_HAS(ua, n, "curl/"))          { HEAVYBAG_VER(ua, n, "curl/", vs, vl);          return HEAVYBAG_BROWSER_CURL; }
-    if (HEAVYBAG_HAS(ua, n, "libmpv"))         { HEAVYBAG_VER(ua, n, "libmpv", vs, vl);         return HEAVYBAG_BROWSER_LIBMPV; }
+    if (HEAVYBAG_HAS(ua, n, "libmpv/"))        { HEAVYBAG_VER(ua, n, "libmpv/", vs, vl);        return HEAVYBAG_BROWSER_LIBMPV; }
     if (HEAVYBAG_HAS(ua, n, "Wget/"))          { HEAVYBAG_VER(ua, n, "Wget/", vs, vl);          return HEAVYBAG_BROWSER_WGET; }
     if (HEAVYBAG_HAS(ua, n, "Lavf/"))          { HEAVYBAG_VER(ua, n, "Lavf/", vs, vl);          return HEAVYBAG_BROWSER_FFMPEG; }
     if (HEAVYBAG_HAS(ua, n, "AppleCoreMedia/")) { HEAVYBAG_VER(ua, n, "AppleCoreMedia/", vs, vl); return HEAVYBAG_BROWSER_APPLECOREMEDIA; }
@@ -429,10 +450,6 @@ heavybag_ua_try_device(const u_char *ua, size_t n, ngx_http_heavybag_ua_os_e os,
         || HEAVYBAG_HAS(ua, n, ";FOMA;"))
     {
         return HEAVYBAG_CAT_MOBILE;
-    }
-
-    if (HEAVYBAG_HAS(ua, n, "Nintendo DSi;") || HEAVYBAG_HAS(ua, n, "Nintendo Wii;")) {
-        return HEAVYBAG_CAT_CONSOLE;  /* LCOV_EXCL_LINE: unreachable -- "Nintendo DSi;"/"Nintendo Wii;" are caught by try_os (:264-265) -> NINTENDO* enum -> CONSOLE switch (:400) precedes this substring fallback */
     }
 
     return HEAVYBAG_CAT_UNKNOWN;

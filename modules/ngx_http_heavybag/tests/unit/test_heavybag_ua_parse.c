@@ -730,8 +730,10 @@ CTEST(ua_edge, empty_ua_all_fields_unknown)
     ASSERT_EQUAL((size_t) 0, r.vl);
 }
 
-/* A single byte is shorter than every needle (the shortest is "wv", 2 bytes)
- * -> the underflow guard fires for all of them; nothing resolves, no over-read. */
+/* A single byte is shorter than every needle (the shortest are 4-byte tokens
+ * such as "Xbox" / "iPod" / "Edg/"; the 2-byte "wv" needle is gone, replaced by
+ * the anchored "; wv)") -> the underflow guard fires for all of them; nothing
+ * resolves, no over-read. */
 CTEST(ua_edge, single_byte_ua_all_unknown)
 {
     pr_t  r = P("M");
@@ -753,15 +755,17 @@ CTEST(ua_edge, multi_kb_no_delimiter)
 }
 
 /* The Chrome webview form ("...; wv) ... Chrome/...") is detected as chrome via
- * the dedicated wv branch, which deliberately yields NO version slice (vl 0)
- * -- distinct from a normal Chrome UA that slices the Chrome/ version. */
-CTEST(ua_edge, webview_wv_no_version)
+ * the dedicated "; wv)" branch, which still slices the Chrome/ version -- the
+ * embedding app carries no version of its own, so the underlying Chrome version
+ * is the only one there is. (Pre-fix the branch returned early WITHOUT running
+ * HEAVYBAG_VER, so every Android webview reported an empty version.) */
+CTEST(ua_edge, webview_wv_keeps_chrome_version)
 {
     pr_t  r = P("Mozilla/5.0 (Linux; Android 13; wv) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile "
                 "Safari/537.36");
     ASSERT_EQUAL(HEAVYBAG_BROWSER_CHROME, r.b);
-    ASSERT_EQUAL((size_t) 0, r.vl);
+    ASSERT_TRUE(veq(r, "120.0.0.0"));
     ASSERT_EQUAL(HEAVYBAG_OS_ANDROID, r.o);
     ASSERT_EQUAL(HEAVYBAG_CAT_MOBILE, r.c);
     ASSERT_EQUAL(HEAVYBAG_VENDOR_GOOGLE, r.v);
@@ -943,6 +947,81 @@ CTEST(ua_cover, str_tables_full_range)
     ASSERT_TRUE(ngx_http_heavybag_vendor_str(
                     (ngx_http_heavybag_ua_vendor_e) HEAVYBAG_VENDOR_MAX)
                 == &heavybag_vendor_str[HEAVYBAG_VENDOR_UNKNOWN]);
+}
+
+
+/* ===================================================================== *
+ *  Chrome-family ordering + token-anchor regressions                    *
+ *                                                                       *
+ *  The Android-WebView arm used to be (a) FIRST in the Chrome-family     *
+ *  block and (b) keyed on the bare 2-byte substring "wv", so it          *
+ *  swallowed HeadlessChrome UAs and any UA with an incidental "wv"       *
+ *  anywhere in it, and it returned WITHOUT slicing a version. It is now  *
+ *  anchored to the real Android platform token "; wv)", sits BELOW the   *
+ *  HeadlessChrome/ probe, and slices the Chrome/ version.                *
+ *  (The plain-Chrome path is unchanged -- see ua_browser/chrome_desktop.) *
+ * ===================================================================== */
+
+/* An incidental "wv" (here inside a URL, ".../wv)") must NOT be read as the
+ * Android webview token: the UA stays chrome AND keeps its Chrome/ version.
+ * Pre-fix the bare "wv" needle matched and the version came back empty. */
+CTEST(ua_edge, incidental_wv_is_not_webview)
+{
+    pr_t  r = P("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 "
+                "SiteAudit/2 (+https://example.com/wv)");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_CHROME, r.b);
+    ASSERT_TRUE(veq(r, "119.0.0.0"));
+    ASSERT_EQUAL(HEAVYBAG_OS_WINDOWS, r.o);
+}
+
+/* Ordering: a headless Chrome running inside an Android webview carries BOTH
+ * "HeadlessChrome/" and the genuine "; wv)" token. HeadlessChrome/ is probed
+ * first, so the verdict is headlesschrome -- pre-fix the webview arm sat above
+ * it and reported plain chrome with no version. */
+CTEST(ua_edge, headlesschrome_over_webview)
+{
+    pr_t  r = P("Mozilla/5.0 (Linux; Android 13; wv) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) HeadlessChrome/119.0.6045.105 Mobile "
+                "Safari/537.36");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_HEADLESSCHROME, r.b);
+    ASSERT_TRUE(veq(r, "119.0.6045.105"));
+    ASSERT_EQUAL(HEAVYBAG_OS_ANDROID, r.o);
+    ASSERT_EQUAL(HEAVYBAG_VENDOR_GOOGLE, r.v);
+}
+
+/* The anchor half of the same fix: a desktop HeadlessChrome UA with an
+ * incidental "wv" stays headlesschrome (pre-fix it was demoted to chrome,
+ * which also erased the headless signal the spoof logic depends on). */
+CTEST(ua_edge, headlesschrome_with_incidental_wv)
+{
+    pr_t  r = P("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, "
+                "like Gecko) HeadlessChrome/120.0.0.0 Safari/537.36 "
+                "(+https://example.com/wv)");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_HEADLESSCHROME, r.b);
+    ASSERT_TRUE(veq(r, "120.0.0.0"));
+}
+
+/* libmpv: the probe + the version slice were keyed on "libmpv" WITHOUT the
+ * "/" separator, so the slice started at the "/" -- an out-of-charset byte --
+ * and every libmpv client reported an empty version. Both are now "libmpv/",
+ * matching the neighbouring curl/ , Wget/ and Lavf/ arms. */
+CTEST(ua_browser, libmpv_version)
+{
+    pr_t  r = P("libmpv/0.38.0");
+    ASSERT_EQUAL(HEAVYBAG_BROWSER_LIBMPV, r.b);
+    ASSERT_TRUE(veq(r, "0.38.0"));
+}
+
+/* Guards the deletion of the dead "Nintendo DSi;"/"Nintendo Wii;" substring
+ * fallback in try_device: those tokens are consumed by try_os, which yields
+ * OS_NINTENDODSI, which the os-driven CONSOLE arm of the switch already maps --
+ * the fallback below it could never be reached. Behaviour is unchanged. */
+CTEST(ua_cover, nintendo_dsi_console_via_os)
+{
+    pr_t  r = P("Opera/9.50 (Nintendo DSi; Opera/507; U; en-US)");
+    ASSERT_EQUAL(HEAVYBAG_OS_NINTENDODSI, r.o);
+    ASSERT_EQUAL(HEAVYBAG_CAT_CONSOLE, r.c);
 }
 
 

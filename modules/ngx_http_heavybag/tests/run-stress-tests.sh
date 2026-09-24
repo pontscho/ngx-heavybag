@@ -321,10 +321,12 @@ run_s2() {
 # ===========================================================================
 # S3 -- correctness under load (THE gate)
 # ===========================================================================
-# mail wire-only verdict: returns "OK" or "DENY" read off Auth-Status.
+# mail verdict read off the Auth-Status wire header. X-WAF-Key authenticates the
+# caller so the injected Client-IP is honoured (SV11 shared-secret trust model).
 hb_mail_verdict() {
     local ip="$1"
-    curl -s -D - -o /dev/null -H "Client-IP: $ip" "http://127.0.0.1:$P_MAIL/waf-mail-auth" \
+    curl -s -D - -o /dev/null -H 'X-WAF-Key: hbtest-mail-secret' \
+        -H "Client-IP: $ip" "http://127.0.0.1:$P_MAIL/waf-mail-auth" \
         | awk 'tolower($1)=="auth-status:"{ $1=""; sub(/^ /,""); print; exit }'
 }
 
@@ -362,7 +364,9 @@ run_s3() {
         cat "$d/invariants.txt"
     fi
 
-    # mail head: WIRE-ONLY (no status counter). Assert allow+deny mix on the wire.
+    # mail head: assert the allow+deny mix on the wire. These probes run AFTER
+    # the "after" snapshot above, so the http_* counters they now move
+    # (observability-01) never enter the invariant delta.
     local deny allow mail_ok=1
     deny=$(hb_mail_verdict 10.1.2.3)
     allow=$(hb_mail_verdict 203.0.113.7)

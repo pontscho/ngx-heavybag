@@ -210,10 +210,12 @@ fi
 A12=$(curl -s -D - -o /dev/null http://127.0.0.1:28506/waf-mail-auth \
         -H 'Auth-Method: none' -H 'Auth-Protocol: smtp' -H 'Auth-SMTP-Helo: x' \
         -H 'Auth-SMTP-From: <a@b>' -H 'Auth-SMTP-To: <c@d>' \
+        -H 'X-WAF-Key: hbtest-mail-secret' \
         -H 'Client-IP: 203.0.113.7' 2>/dev/null | tr -d '\r')
 A12ok=$(curl -s -D - -o /dev/null http://127.0.0.1:28506/waf-mail-auth \
         -H 'Auth-Method: none' -H 'Auth-Protocol: smtp' -H 'Auth-SMTP-Helo: x' \
         -H 'Auth-SMTP-From: <a@b>' -H 'Auth-SMTP-To: <c@d>' \
+        -H 'X-WAF-Key: hbtest-mail-secret' \
         -H 'Client-IP: 203.0.113.50' 2>/dev/null | tr -d '\r')
 echo "    [A12 blocklisted Client-IP headers]"; printf '%s\n' "$A12" | sed 's/^/      /'
 a12bl=$(printf '%s' "$A12" | grep -i '^Auth-Status:' | tr -d '\r')

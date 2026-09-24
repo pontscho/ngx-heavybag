@@ -21,12 +21,23 @@
  *   back to it). LEAF (12 bytes): [0,2) country | [2,4) reserved | [4,8) ASN |
  *   [8,10) flags | [10,12) reserved.
  *
- * OUT OF UNIT SCOPE (honest limits, NOT faked here) -- the config-time open()
- * path (ngx_http_heavybag_geo_open / _verify) is behind #ifndef and needs
- * ngx_conf_t + mmap + an ECDSA-P521/SHA-512-signed location.db + OpenSSL:
+ * PURE LOADER PREDICATES (in scope): the decisions the config-time loader
+ * makes over untrusted header/tree bytes are extracted as ungated helpers in
+ * heavybag_geo.c -- ngx_http_heavybag_geo_block_oob (block-table bounds),
+ * ngx_http_heavybag_geo_entry_oob (12-byte node/leaf index bounds, shared
+ * with the runtime walker and the leaf decode) and
+ * ngx_http_heavybag_geo_ipv4root (the 96-step descent to the IPv4-mapped
+ * root). V21-V26 drive them directly; only the logging around them lives in
+ * the #ifndef'd geo_open.
+ *
+ * OUT OF UNIT SCOPE (honest limits, NOT faked here) -- the rest of the
+ * config-time open() path (ngx_http_heavybag_geo_open / _verify) is behind
+ * #ifndef and needs ngx_conf_t + mmap + an ECDSA-P521/SHA-512-signed
+ * location.db + OpenSSL:
  *   - magic check, mandatory signature verify, size < DATA_OFF / > MAX_SIZE
- *     rejection, block offset+len > EOF rejection, the 96-level descent to the
- *     IPv4-mapped root, all-zero FILE fail-closed (magic mismatch).
+ *     rejection, all-zero FILE fail-closed (magic mismatch), and the
+ *     post-mmap load-time re-stat (a real file-truncation race -- any unit
+ *     test of it would be flaky, so none is written).
  * These are covered by the Fix-round-3 LIVE nginx test (real FR/AU/US
  * ground-truth lookups against the project's signed geodb/location.db, oracle
  * reference/geolookup.c) and the config-build layer -- they cannot be unit
@@ -630,6 +641,239 @@ CTEST(geo, msb_first_bit_direction)
     rr = look_v4(&db, "128.0.0.0");           /* MSB 1 (0x80) */
     ASSERT_EQUAL('L', rl.country[0]);  ASSERT_EQUAL('L', rl.country[1]);
     ASSERT_EQUAL('R', rr.country[0]);  ASSERT_EQUAL('R', rr.country[1]);
+}
+
+
+/* ======================================================================= *
+ *  Config-time loader predicates (T2 fix round). geo_open() itself stays    *
+ *  behind #ifndef (ngx_conf_t + mmap + OpenSSL), but the two decisions it    *
+ *  makes over untrusted bytes are pure helpers and ARE reachable here.       *
+ * ======================================================================= */
+
+#define V4ROOT_NODES  97          /* nodes 0..95 walked + node 96 = the root */
+
+/*
+ * A well-formed ::ffff:0:0/96 spine: node i -> node i+1, through the bit0
+ * child for the first 80 steps (the leading zeroes) and the bit1 child for
+ * the last 16 (the 0xffff marker), so the descent ends on node 96.
+ */
+static void
+build_v4root_spine(u_char *nt)
+{
+    uint32_t  i;
+
+    memset(nt, 0, (size_t) V4ROOT_NODES * 12);
+
+    for (i = 0; i < 80; i++) {
+        node_set(nt, i, i + 1, 0, SENT);      /* bit0 child -> next node */
+    }
+    for (i = 80; i < 96; i++) {
+        node_set(nt, i, 0, i + 1, SENT);      /* bit1 child -> next node */
+    }
+    node_set(nt, 96, 0, 0, 0);                /* the IPv4-mapped root itself */
+}
+
+
+/* ======================================================================= *
+ *  V21  a complete /96 chain descends to the IPv4-mapped root (no false     *
+ *  rejection introduced by the terminator check).                          *
+ * ======================================================================= */
+CTEST(geo, ipv4root_descent_ok)
+{
+    u_char    nt[V4ROOT_NODES * 12];
+    uint32_t  root = 0xDEADBEEFU;
+
+    build_v4root_spine(nt);
+
+    ASSERT_EQUAL(NGX_HTTP_HEAVYBAG_GEO_V4ROOT_OK,
+        (int) ngx_http_heavybag_geo_ipv4root(nt, (uint32_t) sizeof nt, &root));
+    ASSERT_EQUAL_U(96U, root);
+}
+
+
+/* ======================================================================= *
+ *  V22  (#8 / SV3) a zero child ANYWHERE above depth 96 is the trie's      *
+ *  terminal sentinel, so the /96 chain is short: the load must FAIL.       *
+ *  Pre-fix the descent ignored it, re-read node 0 (always in bounds, so    *
+ *  the bounds check never fired) and kept going, silently adopting a bogus *
+ *  ipv4root -- every IPv4 lookup then walked the wrong subtree. Break at 0 *
+ *  is the all-zero-tree case; 79/80 straddle the bit0 -> bit1 switch.      *
+ * ======================================================================= */
+CTEST(geo, ipv4root_zero_child_before_96_fails)
+{
+    static const uint32_t  breaks[] = { 0, 1, 40, 79, 80, 90, 94 };
+
+    u_char      nt[V4ROOT_NODES * 12];
+    uint32_t    root;
+    ngx_uint_t  k;
+
+    for (k = 0; k < sizeof breaks / sizeof breaks[0]; k++) {
+        build_v4root_spine(nt);
+        node_set(nt, breaks[k], 0, 0, SENT);   /* both children terminal */
+
+        root = 0xDEADBEEFU;
+        ASSERT_EQUAL(NGX_HTTP_HEAVYBAG_GEO_V4ROOT_DEADEND,
+            (int) ngx_http_heavybag_geo_ipv4root(nt, (uint32_t) sizeof nt,
+                                                 &root));
+        ASSERT_EQUAL_U(0xDEADBEEFU, root);     /* untouched on failure */
+    }
+}
+
+
+/* ======================================================================= *
+ *  V23  boundary: a zero produced by the LAST (96th) step is a dead end     *
+ *  TOO. The chain is walked in full, but it names node 0 -- the depth-0 v6  *
+ *  root -- as the IPv4 root, which is the same broken state V22 catches:    *
+ *  a bogus ipv4root, so every IPv4 lookup walks the wrong subtree. In an    *
+ *  intact DB index 0 is depth 0 and is never a valid IPv4 root, so this is  *
+ *  rejected fail-closed rather than adopted. (Pre-fix the descent exempted  *
+ *  the 96th step via `i + 1 < 96` and returned root == 0.)                  *
+ * ======================================================================= */
+CTEST(geo, ipv4root_zero_child_at_last_step_fails)
+{
+    u_char    nt[V4ROOT_NODES * 12];
+    uint32_t  root = 0xDEADBEEFU;
+
+    build_v4root_spine(nt);
+    node_set(nt, 95, 0, 0, SENT);   /* step 95 reads node 95's bit1 child: 0 */
+
+    ASSERT_EQUAL(NGX_HTTP_HEAVYBAG_GEO_V4ROOT_DEADEND,
+        (int) ngx_http_heavybag_geo_ipv4root(nt, (uint32_t) sizeof nt, &root));
+    ASSERT_EQUAL_U(0xDEADBEEFU, root);     /* untouched on failure */
+}
+
+
+/* ======================================================================= *
+ *  V24  a node that does not fit inside the network-tree block aborts the   *
+ *  descent (whole 12-byte node required, never a partial over-read). The    *
+ *  descent reads nodes 0..95, so 96 nodes are exactly enough and 95 are    *
+ *  one short.                                                              *
+ * ======================================================================= */
+CTEST(geo, ipv4root_truncated_tree_fails)
+{
+    u_char    nt[V4ROOT_NODES * 12];
+    uint32_t  root;
+
+    build_v4root_spine(nt);
+
+    root = 0xDEADBEEFU;
+    ASSERT_EQUAL(NGX_HTTP_HEAVYBAG_GEO_V4ROOT_TRUNC,
+        (int) ngx_http_heavybag_geo_ipv4root(nt, 40 * 12, &root));
+    ASSERT_EQUAL_U(0xDEADBEEFU, root);
+
+    /* exact fit: node 95 ends at 96*12 == block_len */
+    root = 0xDEADBEEFU;
+    ASSERT_EQUAL(NGX_HTTP_HEAVYBAG_GEO_V4ROOT_OK,
+        (int) ngx_http_heavybag_geo_ipv4root(nt, 96 * 12, &root));
+    ASSERT_EQUAL_U(96U, root);
+
+    /* one node short: the last step no longer fits */
+    root = 0xDEADBEEFU;
+    ASSERT_EQUAL(NGX_HTTP_HEAVYBAG_GEO_V4ROOT_TRUNC,
+        (int) ngx_http_heavybag_geo_ipv4root(nt, 95 * 12, &root));
+    ASSERT_EQUAL_U(0xDEADBEEFU, root);
+}
+
+
+/* ======================================================================= *
+ *  V25  (SV4, CWE-190 -> 125) block-table bounds are width-independent:     *
+ *  off+len must not be able to wrap a 32-bit size_t into a "fits" verdict.  *
+ * ======================================================================= */
+CTEST(geo, block_bounds_width_independent)
+{
+    const size_t  size = 4200;                 /* a minimum-size DB */
+
+    /* in bounds, including the exact end-of-file fit */
+    ASSERT_FALSE(ngx_http_heavybag_geo_block_oob(0, 0, size) != 0);
+    ASSERT_FALSE(ngx_http_heavybag_geo_block_oob(0, 4200, size) != 0);
+    ASSERT_FALSE(ngx_http_heavybag_geo_block_oob(4200, 0, size) != 0);
+    ASSERT_FALSE(ngx_http_heavybag_geo_block_oob(4000, 200, size) != 0);
+
+    /* one byte past the end; and an offset past the end on its own */
+    ASSERT_TRUE(ngx_http_heavybag_geo_block_oob(4000, 201, size) != 0);
+    ASSERT_TRUE(ngx_http_heavybag_geo_block_oob(4201, 0, size) != 0);
+
+    /* a length that alone exceeds the file, from an in-range offset */
+    ASSERT_TRUE(ngx_http_heavybag_geo_block_oob(8, 0xFFFFFFFFU, size) != 0);
+
+    /*
+     * The pre-fix predicate was `(size_t) off + len > size`. On an ILP32
+     * build size_t IS 32 bits, so off=0xfffffff0 + len=0x20 wraps to 0x10 and
+     * the block was accepted -- db->block[i] would then be base + 0xfffffff0,
+     * far outside the mapping. The wrapped arithmetic is spelled out at fixed
+     * 32-bit width so this reproduces on an LP64 host too (where the pre-fix
+     * form happened to be safe); the shipped predicate must disagree with it.
+     */
+    ASSERT_EQUAL_U(0x10U, (uint32_t) (0xFFFFFFF0U + 0x20U));
+    ASSERT_FALSE((uint32_t) (0xFFFFFFF0U + 0x20U) > (uint32_t) size);
+    ASSERT_TRUE(ngx_http_heavybag_geo_block_oob(0xFFFFFFF0U, 0x20U, size) != 0);
+}
+
+
+/* ======================================================================= *
+ *  V26  (SV4, CWE-190 -> 125) the SAME width-independence requirement for   *
+ *  the 12-byte ENTRY index -- the node/leaf counterpart of V25. One helper, *
+ *  ngx_http_heavybag_geo_entry_oob, now backs all three index sites: the    *
+ *  /96 descent, the runtime walker, and the leaf decode in _lookup.         *
+ *                                                                          *
+ *  Exact-arithmetic half: `idx*12 + 12 <= len` must equal `idx < len/12`,   *
+ *  including a trailing PARTIAL entry (len not a multiple of 12), which     *
+ *  must not be walkable.                                                   *
+ *                                                                          *
+ *  Wrap half: the pre-fix bound was `(size_t) idx * 12 + 12 > len`. On an   *
+ *  ILP32 build size_t IS 32 bits, so the product folds over. The arithmetic *
+ *  is spelled out at fixed 32-bit width below, which is why it reproduces   *
+ *  on an LP64 host too -- where the pre-fix form happened to be safe. So    *
+ *  this test would NOT have failed before the fix on this host; the         *
+ *  written-out fold IS the evidence, and what is required of the shipped    *
+ *  predicate is that it disagree with it. (Same construction and same       *
+ *  honesty caveat as V25.)                                                  *
+ * ======================================================================= */
+CTEST(geo, entry_bounds_width_independent)
+{
+    /* 100 whole entries */
+    ASSERT_FALSE(ngx_http_heavybag_geo_entry_oob(0, 100 * 12) != 0);
+    ASSERT_FALSE(ngx_http_heavybag_geo_entry_oob(99, 100 * 12) != 0);
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(100, 100 * 12) != 0);
+
+    /* single-entry and empty blocks */
+    ASSERT_FALSE(ngx_http_heavybag_geo_entry_oob(0, 12) != 0);
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(1, 12) != 0);
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(0, 0) != 0);
+
+    /* trailing partial entry: 20 bytes hold entry 0 only, never entry 1 */
+    ASSERT_FALSE(ngx_http_heavybag_geo_entry_oob(0, 20) != 0);
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(1, 20) != 0);
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(1, 23) != 0);
+    ASSERT_FALSE(ngx_http_heavybag_geo_entry_oob(1, 24) != 0);
+
+    /*
+     * Vector A -- idx = 0x7fffffff, the LARGEST index the leaf path can
+     * carry (0x80000000 is the internal-node marker, so a leaf index is at
+     * most 0x7fffffff; V14 feeds exactly this value through _lookup). At
+     * 32-bit width idx*12 folds to 0xfffffff4 and idx*12+12 folds to
+     * EXACTLY 0 -- so the pre-fix bound read "0 > len", false, i.e. IN
+     * BOUNDS for every block length there is, and the decode then indexed
+     * block + 0xfffffff4.
+     */
+    ASSERT_EQUAL_U(0xFFFFFFF4U, (uint32_t) (0x7FFFFFFFU * 12U));
+    ASSERT_EQUAL_U(0U, (uint32_t) (0x7FFFFFFFU * 12U + 12U));
+    ASSERT_FALSE((uint32_t) (0x7FFFFFFFU * 12U + 12U) > (uint32_t) (100 * 12));
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(0x7FFFFFFFU, 100 * 12) != 0);
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(0x7FFFFFFFU, 0xFFFFFFF0U) != 0);
+
+    /*
+     * Vector B -- idx = 357913941 (0x15555555): idx*12 folds to 0xfffffffc
+     * and idx*12+12 to 8, likewise "in bounds" pre-fix. A node index is not
+     * masked at all, so the walker could carry this straight from the DB.
+     */
+    ASSERT_EQUAL_U(0xFFFFFFFCU, (uint32_t) (357913941U * 12U));
+    ASSERT_EQUAL_U(8U, (uint32_t) (357913941U * 12U + 12U));
+    ASSERT_FALSE((uint32_t) (357913941U * 12U + 12U) > (uint32_t) (100 * 12));
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(357913941U, 100 * 12) != 0);
+
+    /* 0xffffffff, for completeness: folds to 0xfffffff4 + 12 == 0 as well */
+    ASSERT_TRUE(ngx_http_heavybag_geo_entry_oob(0xFFFFFFFFU, 100 * 12) != 0);
 }
 
 

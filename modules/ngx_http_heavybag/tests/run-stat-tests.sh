@@ -412,20 +412,25 @@ curl -s "$STAT/prometheus" | grep -q 'heavybag_http_responses_total{code="429"}'
 curl -s "$STAT/prometheus" | grep -q '^heavybag_rate_overflow_total '                   && ok "prom: rate_overflow"     || bad "prom missing rate_overflow"
 
 echo "== SMTP-auth (reputation_check out==NULL) =="
+# The injected Client-IP is only honoured for a caller that authenticates with
+# the shared secret (SV11 trust model), so every probe below carries the
+# X-WAF-Key matching waf_mail_trusted_secret on the 28081 vhost. Without it the
+# module would judge the real loopback peer instead.
+MK='X-WAF-Key: hbtest-mail-secret'
 # blocked Client-IP (10/8) -> Auth-Status carries the deny reason, no crash
-hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 10.1.2.3' http://127.0.0.1:28081/waf-mail-auth)
+hdr=$(curl -s -D - -o /dev/null -H "$MK" -H 'Client-IP: 10.1.2.3' http://127.0.0.1:28081/waf-mail-auth)
 echo "$hdr" | grep -qi 'Auth-Status: static blocklist' && ok "mail-auth deny (out==NULL safe)" || bad "mail-auth deny header: $(echo "$hdr" | grep -i auth-status)"
 # allowed Client-IP -> Auth-Status: OK
-hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 8.8.8.8' http://127.0.0.1:28081/waf-mail-auth)
+hdr=$(curl -s -D - -o /dev/null -H "$MK" -H 'Client-IP: 8.8.8.8' http://127.0.0.1:28081/waf-mail-auth)
 echo "$hdr" | grep -qi 'Auth-Status: OK' && ok "mail-auth allow (out==NULL safe)" || bad "mail-auth allow header: $(echo "$hdr" | grep -i auth-status)"
 
 # rate limit per Client-IP: 8.8.4.4 is reputation-allowed; burst=2 -> the 3rd
 # request in a quick burst is rate-limited. Independent bucket from 8.8.8.8.
-hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
+hdr=$(curl -s -D - -o /dev/null -H "$MK" -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
 echo "$hdr" | grep -qi 'Auth-Status: OK' && ok "mail-auth rate req1 OK" || bad "mail rate req1: $(echo "$hdr" | grep -i auth-status)"
-hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
+hdr=$(curl -s -D - -o /dev/null -H "$MK" -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
 echo "$hdr" | grep -qi 'Auth-Status: OK' && ok "mail-auth rate req2 OK" || bad "mail rate req2: $(echo "$hdr" | grep -i auth-status)"
-hdr=$(curl -s -D - -o /dev/null -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
+hdr=$(curl -s -D - -o /dev/null -H "$MK" -H 'Client-IP: 8.8.4.4' http://127.0.0.1:28081/waf-mail-auth)
 echo "$hdr" | grep -qi 'Auth-Status: rate limit' && ok "mail-auth 3rd request rate-limited" || bad "mail rate req3: $(echo "$hdr" | grep -i auth-status)"
 
 echo "== reload preserves counters =="
