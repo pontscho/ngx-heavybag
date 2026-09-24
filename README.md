@@ -172,6 +172,12 @@ trees, no manual `./configure` dance.
 - CMake ≥ 3.16, a C toolchain (gcc/clang), `make`, and network access
   (sources are fetched at build time).
 - PCRE2 dev headers (linked dynamically) and the usual nginx build deps.
+  **PCRE2 is a hard requirement, not a preference.** The module bounds every
+  regex match with an explicit match/depth limit through the PCRE2 API; nginx's
+  legacy PCRE1 wrapper exposes no such knob, so that path would apply
+  operator-supplied patterns to hostile input with unbounded backtracking
+  (ReDoS). Building against an `--with-pcre` (PCRE1) nginx therefore fails
+  loudly at compile time rather than shipping an unbounded matcher.
 - Everything else is fetched and built by CMake:
   - **OpenSSL 3.5.7** — built from source and statically linked, because
     native QUIC needs OpenSSL ≥ 3.5 (the host's 3.0.2 is too old). nginx
@@ -1415,6 +1421,22 @@ tracked); all derived artifacts are IP-free and gitignored under
   (`waf_blocklist` / `waf_allowlist` are plain CIDR and need no geo database.)
 - The stream (L4) head does pure IP reputation — no UA, scanner-path, or
   spoofing logic (L4 has no headers or request line).
+- **Subrequests are not inspected.** Both handlers return early for
+  `r != r->main`, so an nginx-internal subrequest (`ssi`, `mirror`,
+  `auth_request`, `X-Accel-Redirect`, …) is never run through the WAF pipeline.
+  This is deliberate and, in the normal case, harmless: heavybag inspects the
+  **main** request at `POST_READ` and `PREACCESS`, which both run *before*
+  `mirror` (`PRECONTENT`) and `auth_request` (`ACCESS`) — so by the time a
+  subrequest exists, its content has already been inspected (and blocked, if it
+  was hostile) on the main request, and `mirror` discards its response anyway.
+  It also keeps one client request counted once. The consequence to be aware of:
+  a *stricter* per-location heavybag ruleset on the subrequest's target
+  `location` does **not** apply to the subrequest — only the main request's
+  location ruleset was ever evaluated. If you rely on `mirror` or
+  `auth_request` to reach a real client-facing backend that carries rules you
+  assume are enforced, verify that assumption; this is an inherent limitation
+  of nginx's subrequest architecture, not something the module can close from
+  a phase handler.
 
 
 ## Reference
