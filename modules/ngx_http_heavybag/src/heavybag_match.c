@@ -321,11 +321,36 @@ ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
     return ngx_http_heavybag_re_classify(rc);
 }
 #else
+
+/*
+ * PCRE2 is a BUILD REQUIREMENT for a shipped heavybag (SV19, CWE-1333).
+ *
+ * The arm below applies operator-supplied regexes with no match or depth limit,
+ * so a pathological pattern over hostile input is an unbounded-backtracking
+ * (ReDoS) surface. The canonical build pins PCRE2 (see CMakeLists.txt /
+ * cmake/Versions.cmake), which selects the bounded arm above -- but a
+ * downstream rebuild against an --with-pcre (PCRE1) nginx would silently pick
+ * THIS one up. Fail at build time instead of shipping an unbounded matcher:
+ * loud and early beats silent and in production.
+ *
+ * The unit build (tests/unit/test-match-pcre1.c) deliberately forces this arm
+ * to keep the tri-state classification covered, so it is exempt.
+ *
+ * If PCRE1 ever has to be supported for real, the fix is NOT to delete this
+ * guard: PCRE1 itself does have the knobs (pcre_extra->match_limit and
+ * ->match_limit_recursion). It is only nginx's PCRE1 *wrapper* that does not
+ * expose them -- the "no match-limit knob" note that used to sit here was
+ * wrong about which layer is missing them.
+ */
+#if !defined(HEAVYBAG_MATCH_UNIT_TEST)
+#error "heavybag requires an nginx built against PCRE2: the PCRE1 path applies regexes with no match/depth limit (ReDoS). Rebuild nginx with --with-pcre=<pcre2-source>."
+#endif
+
 static ngx_http_heavybag_re_e
 ngx_http_heavybag_regex_exec(ngx_regex_t *re, ngx_str_t *s)
 {
-    /* PCRE1: no match-limit knob (see #7); still classified so an internal
-     * error fails CLOSED instead of being read as a clean no-match. */
+    /* Still classified, so an internal error fails CLOSED instead of being
+     * read as a clean no-match. */
     return ngx_http_heavybag_re_classify((int) ngx_regex_exec(re, s, NULL, 0));
 }
 #endif
