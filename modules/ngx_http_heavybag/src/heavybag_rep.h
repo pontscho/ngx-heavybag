@@ -98,6 +98,23 @@ typedef struct {
     uint16_t                       flag_mask;  /* libloc flags to block    */
     ngx_array_t                   *blocklist;  /* ngx_cidr_t -> deny       */
     ngx_array_t                   *allowlist;  /* ngx_cidr_t -> allow      */
+    /*
+     * waf_flag_block set-marker. flag_mask, flag_cc and flag_block_unknown are
+     * the three parts of ONE directive (a bit-carrying flag; a special source
+     * code such as Tor's T1, which has no bit; and the "no geo record at all"
+     * case), so none of them is a usable "was it set here?" sentinel on its
+     * own: `waf_flag_block tor` leaves flag_mask == 0. This explicit marker is
+     * the sentinel the merge keys off - see ngx_http_heavybag_rep_conf_merge().
+     */
+    unsigned                       flag_block_set:1;
+    /*
+     * `waf_flag_block unknown`: deny a source the geo database has no record
+     * for. OFF by default -- deny-list semantics let an unresolvable source
+     * through (AWS WAF's "XX" label matches no country list; Cloudflare
+     * exposes "XX" for the operator to name next to "T1"). Whitelist mode
+     * (allow_cc) is fail-closed on its own and ignores this bit.
+     */
+    unsigned                       flag_block_unknown:1;
 } ngx_heavybag_rep_conf_t;
 
 
@@ -196,6 +213,53 @@ ngx_int_t ngx_http_heavybag_flag_add(ngx_conf_t *cf, ngx_heavybag_rep_conf_t *re
  */
 struct ngx_http_heavybag_geo_db_s *ngx_http_heavybag_geo_open(ngx_conf_t *cf,
     ngx_str_t *path);
+
+
+/*
+ * Shared reputation config layer (rep-conf-01). The HTTP location conf and
+ * the stream server conf embed the SAME ngx_heavybag_rep_conf_t, so the merge
+ * step, the fail-closed validation and every waf_* reputation directive are
+ * implemented once here; each head keeps a two-line wrapper that dereferences
+ * its own conf struct. Both heads therefore inherit and validate identically
+ * -- the two hand-written copies had already drifted apart.
+ */
+
+/* Inherit every reputation field this level left unset from *prev. Pure (no
+ * nginx): callable from the standalone unit TU. */
+void ngx_http_heavybag_rep_conf_merge(ngx_heavybag_rep_conf_t *prev,
+    ngx_heavybag_rep_conf_t *conf);
+
+/* 1 when a geo-dependent deny policy is configured without a geo database
+ * (the fail-closed predicate behind *_rep_conf_validate). Pure. */
+ngx_uint_t ngx_http_heavybag_rep_conf_needs_geo(ngx_heavybag_rep_conf_t *rep);
+
+/*
+ * Config-time validation: rejects a geo-dependent deny policy with no geo
+ * database (it would silently fail open). MUST run AFTER the merge, so it
+ * judges the full effective config. Returns NGX_CONF_OK / NGX_CONF_ERROR.
+ */
+char *ngx_http_heavybag_rep_conf_validate(ngx_conf_t *cf,
+    ngx_heavybag_rep_conf_t *rep);
+
+/*
+ * Shared directive workers. Each reads cf->args itself and returns an nginx
+ * setter result (NGX_CONF_OK / NGX_CONF_ERROR / "is duplicate"), so the HTTP
+ * and stream setters are pure delegation.
+ */
+char *ngx_http_heavybag_rep_set_geo_db(ngx_conf_t *cf,
+    ngx_heavybag_rep_conf_t *rep);
+char *ngx_http_heavybag_rep_set_geo_block(ngx_conf_t *cf,
+    ngx_heavybag_rep_conf_t *rep);
+char *ngx_http_heavybag_rep_set_geo_whitelist(ngx_conf_t *cf,
+    ngx_heavybag_rep_conf_t *rep);
+char *ngx_http_heavybag_rep_set_asn_block(ngx_conf_t *cf,
+    ngx_heavybag_rep_conf_t *rep);
+char *ngx_http_heavybag_rep_set_flag_block(ngx_conf_t *cf,
+    ngx_heavybag_rep_conf_t *rep);
+char *ngx_http_heavybag_rep_set_blocklist(ngx_conf_t *cf,
+    ngx_heavybag_rep_conf_t *rep);
+char *ngx_http_heavybag_rep_set_allowlist(ngx_conf_t *cf,
+    ngx_heavybag_rep_conf_t *rep);
 
 
 /*

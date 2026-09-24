@@ -31,6 +31,13 @@
 #     B9  multi-Cookie ngx_list walk (2nd header matches)
 #     B10 empty Cookie short-circuit
 #
+#   Part C (UA-list merge semantics -- ua-list-01 / T5.c / SV10, CWE-284):
+#     C1-C2 scanner category: inherited -> 404, child empty list -> 200
+#     C3-C4 bot category (flag-only): inherited -> type=bot, child empty -> regular
+#     C5    benign browser UA unaffected on all three locations
+#     C6-C7 per-category isolation (emptying one slot keeps the sibling armed)
+#     C8    "loaded 0 UA pattern(s)" NOTICE on a real start
+#
 # H3/QUIC is NOT exercised: the system curl (7.81) has no HTTP/3 client. The
 # QUIC JA4 path shares ngx_http_heavybag_ja4_compute with the TLS path (covered
 # by A2/A3 + the Phase 6c extractor unit), so the only H3-specific gap is the
@@ -308,6 +315,81 @@ assert_code "B10 empty Cookie short-circuit->200" 200 "$(hit "$CK/" -H 'Cookie;'
 # reason attribution spot-checks (the X-WAF-Reason tuple, non-444 paths)
 r1=$(reason "$AR/?q=%75nion"); [ "$r1" = "args" ] && ok "B reason: args hit -> X-WAF-Reason: args" || bad "B reason: args -> '$r1' (want args)"
 r2=$(reason "$CK/" -H 'Cookie: a=sqlmap'); [ "$r2" = "cookie" ] && ok "B reason: cookie hit -> X-WAF-Reason: cookie" || bad "B reason: cookie -> '$r2' (want cookie)"
+
+echo
+echo "================  Part C: UA-list merge semantics (ua-list-01)  ================"
+# The behavioural proof of the UA-list path-sentinel fix (T5.c / code-review #4 /
+# SV10). The 28509 vhost arms scanner+bot UA categories at SERVER level with
+# waf_bot_block on; three locations differ only in which category they re-declare
+# with a ZERO-pattern list (corpus/empty-ua.list). Because an empty list compiles
+# to ua_re[cat] == NULL, the pre-fix merge (which inherited on that NULL) silently
+# re-imported the parent regex -- so C2/C4 below would have matched the control.
+#
+# waf_bot_block enforces only the scanner/empty classes (404, reason=scanner_ua);
+# the bot class is flag-only by design (lists/bot.list header), so the bot half is
+# asserted via $waf_type, not a status code. C6/C7 pin per-category isolation:
+# emptying one slot must not disturb the sibling slot.
+UM=http://127.0.0.1:28509
+SCANUA='sqlmap'                            # matches lists/scanner-ua.list:10
+BOTUA='Twitterbot/1.0'                     # matches lists/bot.list:13
+BROWUA='Mozilla/5.0 (test)'                # matches neither list -> regular
+
+# "<code> <X-WAF-Type> <X-WAF-Reason>" for one GET (dashes when absent).
+umprobe() {  # <path> <ua>
+    curl -s -D - -o /dev/null -A "$2" -w 'CODE %{http_code}\n' "$UM$1" 2>/dev/null \
+    | tr -d '\r' \
+    | awk 'tolower($1)=="x-waf-type:"{t=$2}
+           tolower($1)=="x-waf-reason:"{n=$2}
+           $1=="CODE"{c=$2}
+           END{printf "%s %s %s\n", (c==""?"-":c), (t==""?"-":t), (n==""?"-":n)}'
+}
+
+assert_um() {  # <label> <path> <ua> <want-code> <want-type>
+    local gc gt gn
+    read -r gc gt gn <<<"$(umprobe "$2" "$3")"
+    if [ "$gc" = "$4" ] && [ "$gt" = "$5" ]; then
+        ok "$1 (code=$gc type=$gt reason=$gn)"
+    else
+        bad "$1: code=$gc type=$gt reason=$gn (want code=$4 type=$5)"
+    fi
+}
+
+# --- scanner category: the enforcing half (404 vs 200) ----------------------
+assert_um "C1 inheriting location + scanner UA -> BLOCKED (server list inherited)" \
+          /uainherit/index.html "$SCANUA" 404 scanner
+assert_um "C2 empty-scanner-list location + scanner UA -> 200 (category really OFF)" \
+          /uaempty-scanner/index.html "$SCANUA" 200 regular
+
+# --- bot category: the flag-only half ($waf_type) ---------------------------
+assert_um "C3 inheriting location + bot UA -> 200 + type=bot (flag-only, inherited)" \
+          /uainherit/index.html "$BOTUA" 200 bot
+assert_um "C4 empty-bot-list location + bot UA -> type=regular (category really OFF)" \
+          /uaempty-bot/index.html "$BOTUA" 200 regular
+
+# --- no side effect on a benign browser UA anywhere -------------------------
+assert_um "C5a benign browser UA on inheriting location -> 200 regular" \
+          /uainherit/index.html "$BROWUA" 200 regular
+assert_um "C5b benign browser UA on empty-scanner location -> 200 regular" \
+          /uaempty-scanner/index.html "$BROWUA" 200 regular
+assert_um "C5c benign browser UA on empty-bot location -> 200 regular" \
+          /uaempty-bot/index.html "$BROWUA" 200 regular
+
+# --- per-category isolation: one empty slot must not disable its sibling ----
+assert_um "C6 empty-BOT location + scanner UA -> still BLOCKED (scanner slot intact)" \
+          /uaempty-bot/index.html "$SCANUA" 404 scanner
+assert_um "C7 empty-SCANNER location + bot UA -> still type=bot (bot slot intact)" \
+          /uaempty-scanner/index.html "$BOTUA" 200 bot
+
+# --- the operator-visible zero-pattern NOTICE -------------------------------
+# ngx_http_heavybag_ua_list_compile logs "loaded 0 UA pattern(s)" for each empty
+# list. `nginx -t` filters NGX_LOG_NOTICE away (which is why run-config-tests.sh
+# V35 can only assert acceptance), so it is asserted here, on a real start.
+n0=$(grep -ac 'loaded 0 UA pattern' "$ELOG" 2>/dev/null || true)
+if [ "${n0:-0}" -ge 2 ]; then
+    ok "C8 zero-pattern UA lists logged: $n0 x 'loaded 0 UA pattern(s)' NOTICE"
+else
+    bad "C8 zero-pattern NOTICE count=$n0 (want >=2, one per empty-ua.list use)"
+fi
 
 # --- error log must be clean ------------------------------------------------
 echo

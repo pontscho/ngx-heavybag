@@ -654,6 +654,451 @@ CTEST(rep, precedence_flag_cc_beats_whitelist)
 }
 
 
+/* ======================================================================= *
+ *  U1 (SV14/T5.d)  block mode + no geo record + a flag policy but NO       *
+ *  `unknown` token -> ALLOW. This is the deny-list convention: a missing    *
+ *  record is a data-freshness gap, not proof of Tor-ness (an attacker       *
+ *  cannot delete itself from the database), so the platform does not decide *
+ *  for the operator -- cf. AWS WAF's "XX" label matching no country list.  *
+ * ======================================================================= */
+CTEST(rep, no_record_flag_policy_without_token_allows)
+{
+    ngx_heavybag_rep_conf_t       rep;
+    ngx_str_t                     reason;
+    ngx_http_heavybag_verdict_t   out;
+    struct sockaddr_in            sin;
+    uint16_t                      fcc[1];
+    ngx_array_t                   fc;
+
+    reset(&rep, &reason, &out);
+    rep.geo_db = &g_db;
+    g_geo.found = 0;                           /* IP absent from the database */
+    rep.allow_cc = NULL;                       /* block mode                  */
+    rep.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP;
+    fcc[0] = CC16('T', '1');                   /* "waf_flag_block tor drop"   */
+    fc.elts = fcc; fc.nelts = 1;
+    rep.flag_cc = &fc;
+    rep.flag_block_set = 1;
+    rep.flag_block_unknown = 0;                /* the `unknown` token is OFF  */
+    mk_v4(&sin, "192.0.2.66");
+
+    ASSERT_EQUAL(NGX_DECLINED,
+        ngx_http_heavybag_reputation_check(&rep, (struct sockaddr *) &sin,
+                                           &reason, &out));
+    ASSERT_EQUAL(HEAVYBAG_REASON_NONE, out.reason);
+    ASSERT_EQUAL_U(1, out.geo_valid);          /* a lookup ran, it just missed */
+}
+
+
+/* ======================================================================= *
+ *  U2 (SV14/T5.d)  the opt-in: "waf_flag_block tor unknown" -> the same     *
+ *  no-record source is DENIED. flag_mask stays 0 here (tor carries no bit   *
+ *  and `unknown` carries neither bit nor code), so the bit is the only      *
+ *  thing that can drive this verdict.                                      *
+ * ======================================================================= */
+CTEST(rep, no_record_unknown_token_denies)
+{
+    ngx_heavybag_rep_conf_t       rep;
+    ngx_str_t                     reason;
+    ngx_http_heavybag_verdict_t   out;
+    struct sockaddr_in            sin;
+    uint16_t                      fcc[1];
+    ngx_array_t                   fc;
+
+    reset(&rep, &reason, &out);
+    rep.geo_db = &g_db;
+    g_geo.found = 0;
+    rep.allow_cc = NULL;
+    rep.flag_mask = 0;
+    fcc[0] = CC16('T', '1');
+    fc.elts = fcc; fc.nelts = 1;
+    rep.flag_cc = &fc;
+    rep.flag_block_set = 1;
+    rep.flag_block_unknown = 1;                /* "... unknown" */
+    mk_v4(&sin, "192.0.2.67");
+
+    ASSERT_EQUAL(NGX_HTTP_FORBIDDEN,
+        ngx_http_heavybag_reputation_check(&rep, (struct sockaddr *) &sin,
+                                           &reason, &out));
+    ASSERT_EQUAL(HEAVYBAG_REASON_FLAG, out.reason);
+    ASSERT_TRUE(reason_is(&reason, "network flag (no geo record)"));
+    ASSERT_EQUAL_U(1, out.geo_valid);
+    ASSERT_EQUAL_U(0, out.flags);              /* nothing to attribute a bit to */
+}
+
+
+/* ======================================================================= *
+ *  U3 (SV14/T5.d)  whitelist mode is fail-closed on its own and ignores    *
+ *  the token: the 404 hide wins even with `unknown` off.                   *
+ * ======================================================================= */
+CTEST(rep, no_record_whitelist_unchanged)
+{
+    ngx_heavybag_rep_conf_t       rep;
+    ngx_str_t                     reason;
+    ngx_http_heavybag_verdict_t   out;
+    struct sockaddr_in            sin;
+    uint16_t                      acc[1];
+    ngx_array_t                   allow;
+
+    reset(&rep, &reason, &out);
+    rep.geo_db = &g_db;
+    g_geo.found = 0;
+    acc[0] = CC16('U', 'S');
+    allow.elts = acc; allow.nelts = 1;
+    rep.allow_cc = &allow;
+    rep.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP;   /* both policies set */
+    rep.flag_block_set = 1;
+    rep.flag_block_unknown = 0;                        /* no opt-in needed  */
+    mk_v4(&sin, "192.0.2.68");
+
+    ASSERT_EQUAL(NGX_HTTP_NOT_FOUND,
+        ngx_http_heavybag_reputation_check(&rep, (struct sockaddr *) &sin,
+                                           &reason, &out));
+    ASSERT_EQUAL(HEAVYBAG_REASON_GEO_WHITELIST, out.reason);
+    ASSERT_TRUE(reason_is(&reason, "geo not whitelisted"));
+}
+
+
+/* ----------------------------------------------------------------------- *
+ *  Shared conf-merge layer (rep-conf-01 / flag-unit-01).                    *
+ *  ngx_http_heavybag_rep_conf_merge() + _needs_geo() are the SINGLE         *
+ *  implementation behind both the HTTP location merge and the stream server *
+ *  merge, so asserting them here asserts both heads at once -- that is the  *
+ *  point of the consolidation (the two hand-written copies had drifted).    *
+ * ----------------------------------------------------------------------- */
+
+/* one fully-populated parent policy, reused by the merge cases */
+static void
+mk_parent(ngx_heavybag_rep_conf_t *prev, ngx_array_t *a)
+{
+    memset(prev, 0, sizeof *prev);
+    prev->geo_db = &g_db;
+    prev->block_cc = a;
+    prev->block_asn = a;
+    prev->allow_cc = a;
+    prev->flag_cc = a;
+    prev->flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP;
+    prev->flag_block_set = 1;
+    prev->flag_block_unknown = 1;
+    prev->blocklist = a;
+    prev->allowlist = a;
+}
+
+
+/* ======================================================================= *
+ *  M1  child that configured nothing inherits every field from the parent. *
+ * ======================================================================= */
+CTEST(rep, merge_child_empty_inherits_all)
+{
+    ngx_heavybag_rep_conf_t  prev, conf;
+    ngx_array_t              a;
+
+    mk_parent(&prev, &a);
+    memset(&conf, 0, sizeof conf);
+
+    ngx_http_heavybag_rep_conf_merge(&prev, &conf);
+
+    ASSERT_TRUE(conf.geo_db == &g_db);
+    ASSERT_TRUE(conf.block_cc == &a);
+    ASSERT_TRUE(conf.block_asn == &a);
+    ASSERT_TRUE(conf.allow_cc == &a);
+    ASSERT_TRUE(conf.flag_cc == &a);
+    ASSERT_EQUAL_U(NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP, conf.flag_mask);
+    ASSERT_EQUAL_U(1, conf.flag_block_unknown); /* all THREE parts travel */
+    ASSERT_EQUAL_U(1, conf.flag_block_set);     /* marker travels with the unit */
+    ASSERT_TRUE(conf.blocklist == &a);
+    ASSERT_TRUE(conf.allowlist == &a);
+}
+
+
+/* ======================================================================= *
+ *  M2  child that configured everything inherits nothing (clean override). *
+ * ======================================================================= */
+CTEST(rep, merge_child_full_inherits_nothing)
+{
+    ngx_heavybag_rep_conf_t   prev, conf;
+    ngx_array_t               a, b;
+    ngx_http_heavybag_geo_db_t  own_db;
+
+    mk_parent(&prev, &a);
+
+    memset(&conf, 0, sizeof conf);
+    conf.geo_db = &own_db;
+    conf.block_cc = &b;
+    conf.block_asn = &b;
+    conf.allow_cc = &b;
+    conf.flag_cc = &b;
+    conf.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_ANYCAST;
+    conf.flag_block_set = 1;
+    conf.blocklist = &b;
+    conf.allowlist = &b;
+
+    ngx_http_heavybag_rep_conf_merge(&prev, &conf);
+
+    ASSERT_TRUE(conf.geo_db == &own_db);
+    ASSERT_TRUE(conf.block_cc == &b);
+    ASSERT_TRUE(conf.block_asn == &b);
+    ASSERT_TRUE(conf.allow_cc == &b);
+    ASSERT_TRUE(conf.flag_cc == &b);
+    ASSERT_EQUAL_U(NGX_HTTP_HEAVYBAG_GEO_FLAG_ANYCAST, conf.flag_mask);
+    /* the parent's `unknown` opt-in must NOT leak into a child that spelled
+     * out its own waf_flag_block -- the whole unit is overridden */
+    ASSERT_EQUAL_U(0, conf.flag_block_unknown);
+    ASSERT_TRUE(conf.blocklist == &b);
+    ASSERT_TRUE(conf.allowlist == &b);
+}
+
+
+/* ======================================================================= *
+ *  M3 (#2 / SV8)  waf_flag_block is ONE unit: a TOR-ONLY child overrides    *
+ *  BOTH halves. Pre-fix the child's flag_mask was 0 (tor carries no bit),   *
+ *  so the `flag_mask == 0` inherit rule silently re-imported the parent's   *
+ *  DROP bit -- a policy the child never asked for (CWE-284).               *
+ * ======================================================================= */
+CTEST(rep, merge_flag_block_tor_child_overrides_both)
+{
+    ngx_heavybag_rep_conf_t       prev, conf;
+    ngx_array_t                   pfc, cfc;
+    uint16_t                      pcodes[2], ccodes[1];
+    ngx_str_t                     reason;
+    ngx_http_heavybag_verdict_t   out;
+    struct sockaddr_in            sin;
+
+    /* parent: waf_flag_block tor drop unknown -> mask=DROP, cc={T1,XD}, unk=1 */
+    pcodes[0] = CC16('T', '1'); pcodes[1] = CC16('X', 'D');
+    pfc.elts = pcodes; pfc.nelts = 2;
+    memset(&prev, 0, sizeof prev);
+    prev.geo_db = &g_db;
+    prev.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP;
+    prev.flag_cc = &pfc;
+    prev.flag_block_set = 1;
+    prev.flag_block_unknown = 1;
+
+    /* child: waf_flag_block tor  ->  mask=0, flag_cc={T1}, unk=0 */
+    ccodes[0] = CC16('T', '1');
+    cfc.elts = ccodes; cfc.nelts = 1;
+    memset(&conf, 0, sizeof conf);
+    conf.flag_cc = &cfc;
+    conf.flag_block_set = 1;
+
+    ngx_http_heavybag_rep_conf_merge(&prev, &conf);
+
+    ASSERT_EQUAL_U(0, conf.flag_mask);         /* parent's DROP bit NOT pulled in */
+    ASSERT_EQUAL_U(0, conf.flag_block_unknown); /* nor the parent's `unknown` */
+    ASSERT_TRUE(conf.flag_cc == &cfc);
+    ASSERT_TRUE(conf.geo_db == &g_db);         /* unrelated fields still inherit */
+
+    /* behavioural half: a DROP-flagged source is allowed at the child ... */
+    memset(&g_geo, 0, sizeof g_geo);
+    g_match = NULL;
+    reason.len = 0; reason.data = NULL;
+    memset(&out, 0xff, sizeof out);
+    g_geo.found = 1;
+    g_geo.country[0] = 'X'; g_geo.country[1] = 'X';
+    g_geo.flags = NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP;
+    mk_v4(&sin, "198.51.100.77");
+
+    ASSERT_EQUAL(NGX_DECLINED,
+        ngx_http_heavybag_reputation_check(&conf, (struct sockaddr *) &sin,
+                                           &reason, &out));
+
+    /* ... while the parent level, which really did ask for drop, still blocks */
+    memset(&out, 0xff, sizeof out);
+    ASSERT_EQUAL(NGX_HTTP_FORBIDDEN,
+        ngx_http_heavybag_reputation_check(&prev, (struct sockaddr *) &sin,
+                                           &reason, &out));
+    ASSERT_EQUAL(HEAVYBAG_REASON_FLAG, out.reason);
+}
+
+
+/* ======================================================================= *
+ *  M4 (#2 / SV8)  parent "tor drop" + child "anonymous-proxy": the child    *
+ *  blocks A1 ONLY -- neither the parent's DROP bit nor its T1/XD codes leak *
+ *  in -- and the parent level keeps blocking T1 + XD.                      *
+ * ======================================================================= */
+CTEST(rep, merge_flag_block_child_anon_only)
+{
+    ngx_heavybag_rep_conf_t       prev, conf;
+    ngx_array_t                   pfc, cfc;
+    uint16_t                      pcodes[2], ccodes[1];
+    ngx_str_t                     reason;
+    ngx_http_heavybag_verdict_t   out;
+    struct sockaddr_in            sin;
+
+    pcodes[0] = CC16('T', '1'); pcodes[1] = CC16('X', 'D');
+    pfc.elts = pcodes; pfc.nelts = 2;
+    memset(&prev, 0, sizeof prev);
+    prev.geo_db = &g_db;
+    prev.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP;
+    prev.flag_cc = &pfc;
+    prev.flag_block_set = 1;
+
+    ccodes[0] = CC16('A', '1');
+    cfc.elts = ccodes; cfc.nelts = 1;
+    memset(&conf, 0, sizeof conf);
+    conf.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_ANON_PROXY;
+    conf.flag_cc = &cfc;
+    conf.flag_block_set = 1;
+
+    ngx_http_heavybag_rep_conf_merge(&prev, &conf);
+
+    ASSERT_EQUAL_U(NGX_HTTP_HEAVYBAG_GEO_FLAG_ANON_PROXY, conf.flag_mask);
+    ASSERT_TRUE(conf.flag_cc == &cfc);
+
+    /* child: an A1 anonymous-proxy source is blocked */
+    memset(&g_geo, 0, sizeof g_geo);
+    g_match = NULL;
+    reason.len = 0; reason.data = NULL;
+    memset(&out, 0xff, sizeof out);
+    g_geo.found = 1;
+    g_geo.country[0] = 'A'; g_geo.country[1] = '1';
+    g_geo.flags = NGX_HTTP_HEAVYBAG_GEO_FLAG_ANON_PROXY;
+    mk_v4(&sin, "203.0.113.55");
+    ASSERT_EQUAL(NGX_HTTP_FORBIDDEN,
+        ngx_http_heavybag_reputation_check(&conf, (struct sockaddr *) &sin,
+                                           &reason, &out));
+    ASSERT_EQUAL(HEAVYBAG_REASON_FLAG, out.reason);
+
+    /* child: a Tor exit is NOT blocked -- the child overrode the whole unit */
+    memset(&g_geo, 0, sizeof g_geo);
+    memset(&out, 0xff, sizeof out);
+    g_geo.found = 1;
+    g_geo.country[0] = 'T'; g_geo.country[1] = '1';
+    ASSERT_EQUAL(NGX_DECLINED,
+        ngx_http_heavybag_reputation_check(&conf, (struct sockaddr *) &sin,
+                                           &reason, &out));
+
+    /* parent: the same Tor exit still blocks, and so does an XD source */
+    memset(&out, 0xff, sizeof out);
+    ASSERT_EQUAL(NGX_HTTP_FORBIDDEN,
+        ngx_http_heavybag_reputation_check(&prev, (struct sockaddr *) &sin,
+                                           &reason, &out));
+    memset(&g_geo, 0, sizeof g_geo);
+    memset(&out, 0xff, sizeof out);
+    g_geo.found = 1;
+    g_geo.country[0] = 'X'; g_geo.country[1] = 'D';
+    ASSERT_EQUAL(NGX_HTTP_FORBIDDEN,
+        ngx_http_heavybag_reputation_check(&prev, (struct sockaddr *) &sin,
+                                           &reason, &out));
+}
+
+
+/* ======================================================================= *
+ *  M5 (#2 / SV8)  a child that never used waf_flag_block inherits BOTH      *
+ *  halves -- the marker, not flag_mask/flag_cc, decides.                   *
+ * ======================================================================= */
+CTEST(rep, merge_no_flag_block_inherits_both)
+{
+    ngx_heavybag_rep_conf_t  prev, conf;
+    ngx_array_t              pfc;
+    uint16_t                 pcodes[1];
+
+    pcodes[0] = CC16('T', '1');
+    pfc.elts = pcodes; pfc.nelts = 1;
+    memset(&prev, 0, sizeof prev);
+    prev.geo_db = &g_db;
+    prev.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP;
+    prev.flag_cc = &pfc;
+    prev.flag_block_set = 1;
+    prev.flag_block_unknown = 1;
+
+    memset(&conf, 0, sizeof conf);             /* no waf_flag_block here */
+
+    ngx_http_heavybag_rep_conf_merge(&prev, &conf);
+
+    ASSERT_EQUAL_U(NGX_HTTP_HEAVYBAG_GEO_FLAG_DROP, conf.flag_mask);
+    ASSERT_TRUE(conf.flag_cc == &pfc);
+    ASSERT_EQUAL_U(1, conf.flag_block_unknown);   /* the third part too */
+    ASSERT_EQUAL_U(1, conf.flag_block_set);
+}
+
+
+/* ======================================================================= *
+ *  M6 (#12/T5.a)  merge-then-validate ORDER contract. Both heads now run    *
+ *  the identical pair, and validation MUST see the fully inherited config:  *
+ *  a child that only sets a policy is legal because the parent supplies the *
+ *  database; validating before the merge would wrongly reject it.          *
+ * ======================================================================= */
+CTEST(rep, merge_then_validate_order)
+{
+    ngx_heavybag_rep_conf_t   prev, conf;
+    ngx_array_t               a;
+    ngx_http_heavybag_geo_db_t  own_db;
+
+    /* parent owns the database, child owns the policy */
+    memset(&prev, 0, sizeof prev);
+    prev.geo_db = &g_db;
+    memset(&conf, 0, sizeof conf);
+    conf.block_cc = &a;
+
+    /* validating BEFORE the merge would reject this legal config */
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rep_conf_needs_geo(&conf));
+
+    ngx_http_heavybag_rep_conf_merge(&prev, &conf);
+
+    ASSERT_EQUAL_U(0, ngx_http_heavybag_rep_conf_needs_geo(&conf));
+
+    /* a child with its OWN database + its own policy is legal either way --
+     * identical on both heads, which is what the consolidation guarantees */
+    memset(&prev, 0, sizeof prev);
+    memset(&conf, 0, sizeof conf);
+    conf.geo_db = &own_db;
+    conf.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_ANYCAST;
+    conf.flag_block_set = 1;
+    ASSERT_EQUAL_U(0, ngx_http_heavybag_rep_conf_needs_geo(&conf));
+    ngx_http_heavybag_rep_conf_merge(&prev, &conf);
+    ASSERT_EQUAL_U(0, ngx_http_heavybag_rep_conf_needs_geo(&conf));
+}
+
+
+/* ======================================================================= *
+ *  M7 (#12/T5.a)  the fail-closed predicate itself: EVERY geo-dependent     *
+ *  policy trips it on its own, and a database-less config with only plain   *
+ *  CIDR lists (or nothing) is accepted.                                    *
+ * ======================================================================= */
+CTEST(rep, needs_geo_predicate)
+{
+    ngx_heavybag_rep_conf_t  rep;
+    ngx_array_t              a;
+
+    /* nothing geo-dependent configured -> accepted (all arms evaluated) */
+    memset(&rep, 0, sizeof rep);
+    rep.blocklist = &a;
+    rep.allowlist = &a;
+    ASSERT_EQUAL_U(0, ngx_http_heavybag_rep_conf_needs_geo(&rep));
+
+    memset(&rep, 0, sizeof rep); rep.block_cc = &a;
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rep_conf_needs_geo(&rep));
+
+    memset(&rep, 0, sizeof rep); rep.allow_cc = &a;
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rep_conf_needs_geo(&rep));
+
+    memset(&rep, 0, sizeof rep); rep.block_asn = &a;
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rep_conf_needs_geo(&rep));
+
+    memset(&rep, 0, sizeof rep); rep.flag_cc = &a;
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rep_conf_needs_geo(&rep));
+
+    memset(&rep, 0, sizeof rep);
+    rep.flag_mask = NGX_HTTP_HEAVYBAG_GEO_FLAG_SATELLITE;
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rep_conf_needs_geo(&rep));
+
+    /* `waf_flag_block unknown` alone contributes neither a bit nor a code,
+     * but it still needs a database: without one the reputation core returns
+     * at the geo_db == NULL gate and the token would be silently inert */
+    memset(&rep, 0, sizeof rep);
+    rep.flag_block_set = 1;
+    rep.flag_block_unknown = 1;
+    ASSERT_EQUAL_U(1, ngx_http_heavybag_rep_conf_needs_geo(&rep));
+
+    /* a database present short-circuits the whole predicate */
+    memset(&rep, 0, sizeof rep);
+    rep.geo_db = &g_db;
+    rep.block_cc = &a;
+    ASSERT_EQUAL_U(0, ngx_http_heavybag_rep_conf_needs_geo(&rep));
+}
+
+
 int
 main(int argc, const char *argv[])
 {

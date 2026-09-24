@@ -93,6 +93,126 @@ ngx_http_heavybag_stat_cc_bump(void *shm, uint16_t cc16, ngx_uint_t blocked)
 }
 
 
+/*
+ * Field-wise snapshot of the fixed counter section into caller storage.
+ *
+ * Deliberately NOT the bulk `*dst = *sh` struct assignment it replaces: that
+ * lowers to a multi-KB memcpy whose word/vector stores are free to split a
+ * counter that a worker is bumping right then, so a single rendered number
+ * could be neither the pre- nor the post-bump value (a torn read). Copying
+ * each counter on its own keeps every load word-sized and naturally aligned,
+ * which is a single indivisible load on every platform nginx supports -- so
+ * each number emitted is a value that counter genuinely held.
+ *
+ * PER-COUNTER atomicity: yes. CROSS-COUNTER consistency: NO. The counters are
+ * read one after another with no lock, so a total and its breakdown may come
+ * from slightly different instants (http_requests_total can already include a
+ * request whose http_blocked[] bump has not landed yet). That is the intended
+ * trade for a lock-free hot path, it is what the bulk copy actually delivered
+ * too, and it is acceptable for monitoring -- consumers must treat the numbers
+ * as a sample, not as a transaction.
+ *
+ * Lives above the HEAVYBAG_STAT_CC_UNIT_TEST guard with the cc core (it needs
+ * only the layout struct, no nginx runtime) so the standalone unit test can
+ * assert that every field is actually copied.
+ */
+static void
+ngx_http_heavybag_stat_snapshot(ngx_http_heavybag_stat_shm_t *dst,
+    ngx_http_heavybag_stat_shm_t *sh)
+{
+    ngx_uint_t  i;
+
+    /* plain (non-atomic) header fields: written once at init / reload */
+    dst->layout = sh->layout;
+    dst->start_time = sh->start_time;
+    dst->last_reload_time = sh->last_reload_time;
+    dst->nvhosts = sh->nvhosts;
+
+    dst->http_requests_total = sh->http_requests_total;
+    dst->http_allowed = sh->http_allowed;
+    dst->http_allowlist_hits = sh->http_allowlist_hits;
+
+    for (i = 0; i < HEAVYBAG_REASON_MAX; i++) {
+        dst->http_blocked[i] = sh->http_blocked[i];
+        dst->http_would_block[i] = sh->http_would_block[i];
+        dst->stream_denied[i] = sh->stream_denied[i];
+        dst->stream_would_block[i] = sh->stream_would_block[i];
+    }
+
+    for (i = 0; i < HEAVYBAG_ACTION_MAX; i++) {
+        dst->http_scanner_path[i] = sh->http_scanner_path[i];
+    }
+
+    dst->http_resp_403 = sh->http_resp_403;
+    dst->http_resp_404 = sh->http_resp_404;
+    dst->http_resp_444 = sh->http_resp_444;
+    dst->http_resp_429 = sh->http_resp_429;
+
+    for (i = 0; i < HEAVYBAG_UA_MAX; i++) {
+        dst->http_ua[i] = sh->http_ua[i];
+    }
+
+    for (i = 0; i < HEAVYBAG_CAT_MAX; i++) {
+        dst->http_ua_cat[i] = sh->http_ua_cat[i];
+    }
+
+    dst->http_ua_spoofed = sh->http_ua_spoofed;
+
+    for (i = 0; i < HEAVYBAG_FLAG_SLOTS; i++) {
+        dst->flag_blocked[i] = sh->flag_blocked[i];
+    }
+
+    dst->stream_connections_total = sh->stream_connections_total;
+    dst->stream_allowed = sh->stream_allowed;
+
+    dst->cc_overflow = sh->cc_overflow;
+
+    for (i = 0; i < HEAVYBAG_STAT_CC_SLOTS; i++) {
+        dst->cc[i].cc16 = sh->cc[i].cc16;
+        dst->cc[i].total = sh->cc[i].total;
+        dst->cc[i].blocked = sh->cc[i].blocked;
+    }
+}
+
+
+/*
+ * Number of per-vhost rows a /status render may safely walk. THREE bounds all
+ * have to hold and the smallest wins:
+ *
+ *   conf_nvhosts - what this cycle's configuration counted;
+ *   nservers     - length of cmcf->servers, the array the server_name pointers
+ *                  are read from;
+ *   shm_nvhosts  - the segment's OWN nvhosts, i.e. the length of the trailing
+ *                  per-vhost array it was allocated with (the bounds-check
+ *                  contract on ngx_http_heavybag_stat_vhost(), status.h).
+ *
+ * The third bound is not redundant with the first: on a reload nginx re-attaches
+ * the EXISTING segment, so a cycle that adds server{} blocks sees a larger
+ * conf_nvhosts than the slab was sized for, and walking conf_nvhosts rows reads
+ * past the end of the per-vhost array. Reconciling the segment on reload is the
+ * root fix; this clamp is the render-side belt that holds either way.
+ *
+ * Pure integer math, kept above the HEAVYBAG_STAT_CC_UNIT_TEST guard so it is
+ * unit-testable without the nginx runtime.
+ */
+static ngx_uint_t
+ngx_http_heavybag_status_nvhosts(ngx_uint_t conf_nvhosts, ngx_uint_t nservers,
+    ngx_uint_t shm_nvhosts)
+{
+    ngx_uint_t  n = conf_nvhosts;
+
+    if (n > nservers) {
+        n = nservers;
+    }
+
+    if (n > shm_nvhosts) {
+        n = shm_nvhosts;
+    }
+
+    return n;
+}
+
+
 #ifndef HEAVYBAG_STAT_CC_UNIT_TEST
 
 #define HEAVYBAG_STAT_FMT_PLAIN       0
@@ -106,7 +226,7 @@ ngx_http_heavybag_stat_cc_bump(void *shm, uint16_t cc16, ngx_uint_t blocked)
 static ngx_str_t  heavybag_stat_ct_text = ngx_string("text/plain");
 static ngx_str_t  heavybag_stat_ct_json = ngx_string("application/json");
 
-/* flag_blocked[] slot labels, parallel to waf_flag_bits[] in the module TU */
+/* flag_blocked[] slot labels, parallel to heavybag_flag_bits[] in the module TU */
 static const char *heavybag_flag_label[HEAVYBAG_FLAG_SLOTS] = {
     "anon", "satellite", "anycast", "drop"
 };
@@ -814,14 +934,15 @@ ngx_http_heavybag_status_handler(ngx_http_request_t *r)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /* consistent snapshot of the fixed counter section (per-vhost read live) */
-    snap = *sh;
+    /* per-counter-atomic snapshot of the fixed section; NOT cross-counter
+     * consistent (see ngx_http_heavybag_stat_snapshot). Per-vhost rows are read
+     * live, straight out of the segment. */
+    ngx_http_heavybag_stat_snapshot(&snap, sh);
 
-    nvhosts = wmcf->nvhosts;
     cscfp = cmcf->servers.elts;
-    if (nvhosts > cmcf->servers.nelts) {
-        nvhosts = cmcf->servers.nelts;
-    }
+    nvhosts = ngx_http_heavybag_status_nvhosts(wmcf->nvhosts,
+                                               cmcf->servers.nelts,
+                                               snap.nvhosts);
 
     geo_db = wlcf->rep.geo_db;
     fmt = ngx_http_heavybag_status_format(&r->uri);

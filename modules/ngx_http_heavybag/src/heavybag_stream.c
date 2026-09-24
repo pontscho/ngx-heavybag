@@ -324,10 +324,11 @@ ngx_stream_heavybag_create_srv_conf(ngx_conf_t *cf)
 
 
 /*
- * STREAM merge step: inherit the mode (fail-closed default) and every
- * reputation field unset at this server level -- geo db, block_cc, flag_cc,
- * block_asn, allow_cc, flag_mask, blocklist and allowlist. Rejects the config
- * when a geo-dependent deny policy is set without a geo database.
+ * STREAM merge step: inherit the mode (fail-closed default), then hand the
+ * whole reputation block to the shared merge/validate pair (rep-conf-01) that
+ * the HTTP head also uses -- geo db, block_cc, flag_cc, block_asn, allow_cc,
+ * flag_mask, blocklist and allowlist. Rejects the config when a geo-dependent
+ * deny policy is set without a geo database.
  */
 static char *
 ngx_stream_heavybag_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
@@ -338,50 +339,19 @@ ngx_stream_heavybag_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
     /* fail-CLOSED default: an unset waf_stream gate enforces */
     ngx_conf_merge_uint_value(conf->mode, prev->mode, HEAVYBAG_MODE_ENFORCE);
 
-    if (conf->rep.geo_db == NULL) {
-        conf->rep.geo_db = prev->rep.geo_db;
-    }
-    if (conf->rep.block_cc == NULL) {
-        conf->rep.block_cc = prev->rep.block_cc;
-    }
-    if (conf->rep.flag_cc == NULL) {
-        conf->rep.flag_cc = prev->rep.flag_cc;
-    }
-    if (conf->rep.block_asn == NULL) {
-        conf->rep.block_asn = prev->rep.block_asn;
-    }
-    if (conf->rep.allow_cc == NULL) {
-        conf->rep.allow_cc = prev->rep.allow_cc;
-    }
-    if (conf->rep.flag_mask == 0) {
-        conf->rep.flag_mask = prev->rep.flag_mask;
-    }
-    if (conf->rep.blocklist == NULL) {
-        conf->rep.blocklist = prev->rep.blocklist;
-    }
-    if (conf->rep.allowlist == NULL) {
-        conf->rep.allowlist = prev->rep.allowlist;
-    }
+    /*
+     * Reputation data: inherited and then validated by the shared layer in
+     * heavybag_reputation.c, which the HTTP head calls the same way
+     * (rep-conf-01). Validation runs AFTER the whole merge so it judges the
+     * full effective config.
+     */
+    ngx_http_heavybag_rep_conf_merge(&prev->rep, &conf->rep);
+
     if (conf->rate_rules == NULL) {
         conf->rate_rules = prev->rate_rules;
     }
 
-    /*
-     * Fail-closed: a geo-dependent deny policy with no geo database silently
-     * fails open (allows every connection), so the L4 protection would be
-     * configured yet inert. Refuse the config at "nginx -t" rather than let it
-     * bypass silently. (blocklist / allowlist are plain CIDR -- no geo db.)
-     */
-    if (conf->rep.geo_db == NULL
-        && (conf->rep.block_cc != NULL
-            || conf->rep.allow_cc != NULL
-            || conf->rep.block_asn != NULL
-            || conf->rep.flag_cc != NULL
-            || conf->rep.flag_mask != 0))
-    {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-            "waf_geo_block / waf_geo_whitelist / waf_asn_block / waf_flag_block "
-            "require waf_geo_db, but no geo database is configured");
+    if (ngx_http_heavybag_rep_conf_validate(cf, &conf->rep) != NGX_CONF_OK) {
         return NGX_CONF_ERROR;
     }
 
@@ -501,155 +471,73 @@ ngx_stream_heavybag_init(ngx_conf_t *cf)
 
 
 /*
- * waf_geo_db <path>: open and attach the geo database for this stream
- * server. Rejects a duplicate directive; geo_open does the open/validation.
+ * waf_geo_db / waf_geo_block / waf_asn_block / waf_geo_whitelist /
+ * waf_flag_block / waf_blocklist / waf_allowlist: the stream half of the
+ * shared reputation directive layer (rep-conf-01). Each is a two-line wrapper
+ * dereferencing this head's conf struct; the semantics -- duplicate guards,
+ * parsing, error strings -- live once in heavybag_reputation.c, so the L4 and
+ * HTTP surfaces cannot drift apart again.
  */
 static char *
 ngx_stream_heavybag_set_geo_db(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_stream_heavybag_srv_conf_t  *sscf = conf;
-    ngx_str_t                  *value;
 
-    if (sscf->rep.geo_db != NULL) {
-        return "is duplicate";
-    }
-
-    value = cf->args->elts;
-
-    sscf->rep.geo_db = ngx_http_heavybag_geo_open(cf, &value[1]);
-    if (sscf->rep.geo_db == NULL) {
-        return NGX_CONF_ERROR;
-    }
-
-    return NGX_CONF_OK;
+    return ngx_http_heavybag_rep_set_geo_db(cf, &sscf->rep);
 }
 
 
-/*
- * waf_geo_block <CC>...: deny connections from the listed countries. Each
- * ISO-2 country-code argument is appended to rep.block_cc.
- */
 static char *
 ngx_stream_heavybag_set_geo_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_stream_heavybag_srv_conf_t  *sscf = conf;
-    ngx_str_t                  *value = cf->args->elts;
-    ngx_uint_t                  i;
 
-    for (i = 1; i < cf->args->nelts; i++) {
-        if (ngx_http_heavybag_country_add(cf, &sscf->rep.block_cc, &value[i])
-            != NGX_OK)
-        {
-            return NGX_CONF_ERROR;
-        }
-    }
-
-    return NGX_CONF_OK;
+    return ngx_http_heavybag_rep_set_geo_block(cf, &sscf->rep);
 }
 
 
-/*
- * waf_asn_block <ASN>...: deny connections whose source IP resolves to one
- * of the listed autonomous systems. Each argument is appended to
- * rep.block_asn.
- */
 static char *
 ngx_stream_heavybag_set_asn_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_stream_heavybag_srv_conf_t  *sscf = conf;
-    ngx_str_t                  *value = cf->args->elts;
-    ngx_uint_t                  i;
 
-    for (i = 1; i < cf->args->nelts; i++) {
-        if (ngx_http_heavybag_asn_add(cf, &sscf->rep.block_asn, &value[i])
-            != NGX_OK)
-        {
-            return NGX_CONF_ERROR;
-        }
-    }
-
-    return NGX_CONF_OK;
+    return ngx_http_heavybag_rep_set_asn_block(cf, &sscf->rep);
 }
 
 
-/*
- * waf_geo_whitelist <CC>...: allow only connections from the listed
- * countries. Each ISO-2 country-code argument is appended to rep.allow_cc.
- */
 static char *
 ngx_stream_heavybag_set_geo_whitelist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_stream_heavybag_srv_conf_t  *sscf = conf;
-    ngx_str_t                  *value = cf->args->elts;
-    ngx_uint_t                  i;
 
-    for (i = 1; i < cf->args->nelts; i++) {
-        if (ngx_http_heavybag_country_add(cf, &sscf->rep.allow_cc, &value[i])
-            != NGX_OK)
-        {
-            return NGX_CONF_ERROR;
-        }
-    }
-
-    return NGX_CONF_OK;
+    return ngx_http_heavybag_rep_set_geo_whitelist(cf, &sscf->rep);
 }
 
 
-/*
- * waf_flag_block <flag>...: deny connections whose geo record carries one
- * of the named flags. Each argument is parsed via flag_add into the
- * reputation flag_mask and flag_cc state.
- */
 static char *
 ngx_stream_heavybag_set_flag_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_stream_heavybag_srv_conf_t  *sscf = conf;
-    ngx_str_t                  *value = cf->args->elts;
-    ngx_uint_t                  i;
 
-    for (i = 1; i < cf->args->nelts; i++) {
-        if (ngx_http_heavybag_flag_add(cf, &sscf->rep, &value[i]) != NGX_OK) {
-            return NGX_CONF_ERROR;
-        }
-    }
-
-    return NGX_CONF_OK;
+    return ngx_http_heavybag_rep_set_flag_block(cf, &sscf->rep);
 }
 
 
-/*
- * waf_blocklist <CIDR>: append a network to the reputation blocklist whose
- * connections are always denied.
- */
 static char *
 ngx_stream_heavybag_set_blocklist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_stream_heavybag_srv_conf_t  *sscf = conf;
-    ngx_str_t                  *value = cf->args->elts;
 
-    if (ngx_http_heavybag_cidr_add(cf, &sscf->rep.blocklist, &value[1]) != NGX_OK) {
-        return NGX_CONF_ERROR;
-    }
-
-    return NGX_CONF_OK;
+    return ngx_http_heavybag_rep_set_blocklist(cf, &sscf->rep);
 }
 
 
-/*
- * waf_allowlist <CIDR>: append a network to the reputation allowlist whose
- * connections bypass the reputation checks.
- */
 static char *
 ngx_stream_heavybag_set_allowlist(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_stream_heavybag_srv_conf_t  *sscf = conf;
-    ngx_str_t                  *value = cf->args->elts;
 
-    if (ngx_http_heavybag_cidr_add(cf, &sscf->rep.allowlist, &value[1]) != NGX_OK) {
-        return NGX_CONF_ERROR;
-    }
-
-    return NGX_CONF_OK;
+    return ngx_http_heavybag_rep_set_allowlist(cf, &sscf->rep);
 }
 
 

@@ -306,7 +306,8 @@ variable, independent of `waf` / `waf_bot_block`.
 | `waf_method_allow` | `<METHOD> …` | — | **Whitelist:** only the listed HTTP methods pass; every other method → 404. Standard methods (GET, HEAD, POST, PUT, DELETE, OPTIONS, PATCH, TRACE, the WebDAV verbs, …) map to nginx's method bits; non-standard names (e.g. TRACK) are matched verbatim. Wins over `waf_method_deny`. |
 | `waf_method_deny` | `<METHOD> …` | — | **Blacklist:** the listed methods → 404; everything else passes. (Note: nginx core may reject `TRACE` before the WAF, depending on its `allow_special_method` / `limit_except` configuration.) |
 | `waf_geo_whitelist` | `<CC> …` | — | **Allow only** these countries; every other country and any IP with no geo record → 404. Wins over `waf_geo_block`. Repeatable / multi-arg. |
-| `waf_flag_block` | `<flag> …` | — | Block by libloc network flag: `anonymous-proxy` (alias `anon`), `satellite`, `anycast`, `tor`, `drop`. |
+| `waf_flag_block` | `<flag> …` | — | Block by libloc network flag: `anonymous-proxy` (alias `anon`), `satellite`, `anycast`, `tor`, `drop`, plus the `unknown` pseudo-flag below. **One policy unit:** a level that spells out its own `waf_flag_block` overrides the parent's entirely (it inherits none of it); a level that does not use the directive inherits all of it. |
+| `waf_flag_block … unknown` | *(token)* | off | Also deny a source the geo database has **no record** for. **Off by default:** an unresolvable source passes the reputation stage, which is the deny-list convention — AWS WAF labels such an IP `XX`, which matches no country list; Cloudflare exposes `XX` so you can name it explicitly (`ip.src.country in {"T1" "XX"}`); nginx's own geoip2 leaves it to your `map` default. Absence from the database is a data-freshness gap, not proof of Tor-ness, and it is not attacker-controllable (nobody can remove themselves from the DB). Turn it on only when your traffic is expected to be fully resolvable — **it also denies loopback, RFC1918 and anything else absent from the DB**, so pair it with `waf_allowlist` for your own infrastructure. Whitelist mode (`waf_geo_whitelist`) is fail-closed on its own and ignores this token. |
 | `waf_trusted_proxy` | `<cidr>` | — | Trust `X-Forwarded-For` only from these peers when deriving the canonical client IP. |
 | `waf_blocklist` | `<cidr>` | — | Statically deny this network (→ 403). Repeatable. |
 | `waf_allowlist` | `<cidr>` | — | Allow this network, short-circuiting all reputation checks. Repeatable. |
@@ -824,7 +825,7 @@ same reputation/geo semantics as the HTTP head:
 | `waf_geo_block` | `<CC> …` | Block these countries → connection dropped. |
 | `waf_asn_block` | `<ASN> …` | Block these autonomous systems → connection dropped. |
 | `waf_geo_whitelist` | `<CC> …` | Allow only these countries (and known IPs); else dropped. Wins over `waf_geo_block`. |
-| `waf_flag_block` | `<flag> …` | Block by libloc network flag (`anycast`, `anonymous-proxy`, …). |
+| `waf_flag_block` | `<flag> …` | Block by libloc network flag (`anycast`, `anonymous-proxy`, …), plus the `unknown` pseudo-flag. Same semantics as the HTTP head, including the **one policy unit** override rule and the off-by-default `unknown` token — see the [HTTP directive table](#directives). |
 | `waf_blocklist` | `<cidr>` | Statically deny this network. Repeatable. |
 | `waf_allowlist` | `<cidr>` | Allow this network, short-circuiting reputation. Repeatable. |
 | `waf_stream_rate_limit` | `rate=Nr/s\|Nr/m\|Nr/h [burst=N] [for_geo=CC,…]` | Per-IP token-bucket limit at L4; over the limit → connection dropped. Same syntax/semantics as the HTTP `waf_rate_limit`; **the backing zone is the HTTP head's `waf_rate_zone`**, so a `waf_rate_zone` must be declared in `http{}` (if absent the check fail-opens). Detect-mode-aware (`stream_would_block[rate_limit]`). |
@@ -1405,7 +1406,9 @@ tracked); all derived artifacts are IP-free and gitignored under
 - `waf_mail_backend` does not validate that the MTA is reachable — it only
   validates that the address is a numeric IP and the port is in range.
 - Any geo-dependent deny policy (`waf_geo_block`, `waf_geo_whitelist`,
-  `waf_asn_block`, `waf_flag_block`) **requires** `waf_geo_db`. Configuring one
+  `waf_asn_block`, `waf_flag_block` — including a bare `waf_flag_block unknown`,
+  which needs the database to know that a source is absent) **requires**
+  `waf_geo_db`. Configuring one
   without a geo database is a **hard config error** — `nginx -t` fails and nginx
   refuses to start/reload — because a geo policy with no database would
   silently fail open (allow everyone) and the gap would never surface.

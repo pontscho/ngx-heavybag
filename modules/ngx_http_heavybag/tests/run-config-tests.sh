@@ -136,6 +136,16 @@ BIGLINE=$WORK/bigline.list
 CORRUPTDB=$WORK/corrupt.db
 head -c 4096 /dev/zero > "$CORRUPTDB"            # all-zero -> magic/signature fail
 
+# An EXPLICITLY empty (comment-only) UA list: zero patterns, so
+# ngx_http_heavybag_ua_list_compile leaves ua_re[cat] == NULL. This is the
+# config-time half of ua-list-01 (T5.c): such a list must LOAD (it is a valid
+# "match nothing" policy, not a parse error). The behavioural half -- that the
+# level which names it OWNS the category and does not re-inherit the parent's
+# compiled regex -- is proved live by run-protocol-tests.sh Part C against the
+# committed twin fixture tests/corpus/empty-ua.list.
+EMPTYUA=$WORK/empty-ua.list
+printf '# comment-only: zero UA patterns on purpose\n\n' > "$EMPTYUA"
+
 echo
 echo "================  geo-policy fail-closed (require waf_geo_db)  ================"
 
@@ -267,6 +277,31 @@ waf_rate_zone size=1m;
 server { listen 127.0.0.1:28600; location / { return 204; } }
 EOF
 expect_reject "V22 duplicate waf_rate_zone refused" "$C" "is duplicate"
+
+# --- ua-list-01 (T5.c / SV10): the UA-list path sentinel -------------------
+# ngx_http_heavybag_set_ua_list now keys BOTH the duplicate guard and the
+# inherit-on-merge off ua_list[cat].data (the list PATH), not off the compiled
+# ua_re[cat]. V34 exercises the duplicate guard the path sentinel made possible
+# (before the fix there was no ua_list[] to test, so a second waf_bot_list at
+# one level was silently accepted); V35 pins the property that FORCED the
+# sentinel -- an explicitly empty list compiles to a NULL regex and must still
+# be a valid, loadable "match nothing" policy.
+http_conf <<EOF
+server { listen 127.0.0.1:28600; waf on; waf_bot_list $LISTS/bot.list; waf_bot_list $LISTS/bot.list; location / { return 204; } }
+EOF
+expect_reject "V34 duplicate waf_bot_list refused (ua_list[] path sentinel)" "$C" "is duplicate"
+
+http_conf <<EOF
+server { listen 127.0.0.1:28600; waf on; waf_bot_list $EMPTYUA; location / { return 204; } }
+EOF
+# Accept-only, deliberately: the matching "heavybag: loaded 0 UA pattern(s)"
+# NOTICE is emitted by ngx_http_heavybag_ua_list_compile, but `nginx -t` cannot
+# observe it -- under -t the pre-init log filters NGX_LOG_NOTICE away (a WARN at
+# the same parse point DOES survive, which is what V23 asserts), so it reaches
+# neither -t stderr nor the configured error_log. The zero-pattern NOTICE is
+# therefore asserted where nginx really starts: run-protocol-tests.sh Part C
+# greps it out of the live error log.
+expect_accept "V35 explicitly EMPTY waf_bot_list accepted (valid match-nothing policy)" "$C"
 
 echo
 echo "================  list-file parse @ nginx -t (integration of Phase-5 units)  ================"

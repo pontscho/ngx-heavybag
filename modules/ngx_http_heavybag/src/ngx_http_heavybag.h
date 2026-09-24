@@ -95,8 +95,14 @@ typedef struct {
     ngx_str_t                      scanner_list; /* waf_scanner_list path */
     ngx_regex_t                   *scanner_re[HEAVYBAG_ACTION_MAX];
 
-    /* UA classification: one compiled alternation per list-backed category */
+    /* UA classification: one compiled alternation per list-backed category.
+     * ua_list[] is the path sentinel for the duplicate guard and
+     * inherit-on-merge (the sig_list[] model): an explicitly configured empty
+     * list compiles to a NULL ua_re[] slot, so the regex cannot tell "not
+     * configured here" from "configured to match nothing" -- keying the merge
+     * off it silently re-inherited the parent's regex (ua-list-01). */
     ngx_regex_t                   *ua_re[HEAVYBAG_UA_LIST_MAX];
+    ngx_str_t                      ua_list[HEAVYBAG_UA_LIST_MAX];
 
     /* verified-bot CIDR allowlists: a claimed crawler whose canonical client
      * IP is outside the published range for its class is a fake bot (403).
