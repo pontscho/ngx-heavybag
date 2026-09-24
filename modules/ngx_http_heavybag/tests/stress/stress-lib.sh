@@ -9,7 +9,7 @@
 # lifted here to a before/after JSON snapshot + a checked-invariant delta.
 
 # ---------------------------------------------------------------------------
-# The 16 verdict reason slots (heavybag_reason_str minus NONE). These are the
+# The 16 verdict reason slots (ngx_http_heavybag_reason_str minus NONE). These are the
 # ONLY addends of the block/deny sum. Everything else on the wire -- the
 # http_scanner_path_{403,404,444} code breakdown, the http_resp_* tallies, the
 # http_flag_* per-bit breakdown, the http_ua* classifications -- is an OVERLAY

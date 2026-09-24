@@ -122,8 +122,9 @@ typedef struct {
  * Block/deny reason - the single source of truth feeding the per-reason
  * counter index, the $waf_reason variable token and the human log string.
  * Lives here (ngx_core-only header) so the stream translation unit sees it
- * without pulling in ngx_http.h. Keep in lockstep with heavybag_reason_str[] in
- * ngx_http_heavybag_module.c (HEAVYBAG_REASON_MAX == that table's cardinality).
+ * without pulling in ngx_http.h. Keep in lockstep with
+ * ngx_http_heavybag_reason_str[] in ngx_http_heavybag_module.c
+ * (HEAVYBAG_REASON_MAX == that table's cardinality).
  */
 typedef enum {
     HEAVYBAG_REASON_NONE = 0,       /* allowed: no rule matched          */

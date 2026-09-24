@@ -18,7 +18,7 @@
  *     document. The PLAIN format is a human/debug view and prints the name
  *     verbatim -- it is not a parser target.
  *   - reason / type / category labels are compile-time ASCII constants
- *     (heavybag_reason_str[] etc.), so they need no escaping.
+ *     (ngx_http_heavybag_reason_str[] etc.), so they need no escaping.
  *   - The geo health block exposes only the network count and mapped size,
  *     never the database path or build host. No client IP / PII is ever emitted.
  */
@@ -419,13 +419,13 @@ ngx_http_heavybag_status_plain(u_char *p, u_char *last,
 
     for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p, "http_blocked_%V %uA\n",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->http_blocked[i]);
     }
 
     for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p, "http_would_block_%V %uA\n",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->http_would_block[i]);
     }
 
@@ -447,7 +447,7 @@ ngx_http_heavybag_status_plain(u_char *p, u_char *last,
 
     for (i = 0; i < HEAVYBAG_UA_MAX; i++) {
         p = ngx_snprintf(p, last - p, "http_ua_%V %uA\n",
-                         &heavybag_type_str[i],
+                         &ngx_http_heavybag_type_str[i],
                          (ngx_atomic_uint_t) snap->http_ua[i]);
     }
 
@@ -474,13 +474,13 @@ ngx_http_heavybag_status_plain(u_char *p, u_char *last,
 
     for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p, "stream_denied_%V %uA\n",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->stream_denied[i]);
     }
 
     for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p, "stream_would_block_%V %uA\n",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->stream_would_block[i]);
     }
 
@@ -509,7 +509,7 @@ ngx_http_heavybag_status_plain(u_char *p, u_char *last,
                          (ngx_atomic_uint_t) v->allowed);
         for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
             p = ngx_snprintf(p, last - p, " blocked_%V=%uA",
-                             &heavybag_reason_str[i],
+                             &ngx_http_heavybag_reason_str[i],
                              (ngx_atomic_uint_t) v->blocked[i]);
         }
         p = ngx_snprintf(p, last - p, "\n");
@@ -593,7 +593,7 @@ ngx_http_heavybag_status_json(u_char *p, u_char *last,
 
     for (i = HEAVYBAG_REASON_NONE + 1, first = 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p, "%s\"%V\":%uA", first ? "" : ",",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->http_blocked[i]);
         first = 0;
     }
@@ -602,7 +602,7 @@ ngx_http_heavybag_status_json(u_char *p, u_char *last,
 
     for (i = HEAVYBAG_REASON_NONE + 1, first = 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p, "%s\"%V\":%uA", first ? "" : ",",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->http_would_block[i]);
         first = 0;
     }
@@ -622,7 +622,7 @@ ngx_http_heavybag_status_json(u_char *p, u_char *last,
 
     for (i = 0, first = 1; i < HEAVYBAG_UA_MAX; i++) {
         p = ngx_snprintf(p, last - p, "%s\"%V\":%uA", first ? "" : ",",
-                         &heavybag_type_str[i],
+                         &ngx_http_heavybag_type_str[i],
                          (ngx_atomic_uint_t) snap->http_ua[i]);
         first = 0;
     }
@@ -651,7 +651,7 @@ ngx_http_heavybag_status_json(u_char *p, u_char *last,
 
     for (i = HEAVYBAG_REASON_NONE + 1, first = 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p, "%s\"%V\":%uA", first ? "" : ",",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->stream_denied[i]);
         first = 0;
     }
@@ -660,7 +660,7 @@ ngx_http_heavybag_status_json(u_char *p, u_char *last,
 
     for (i = HEAVYBAG_REASON_NONE + 1, first = 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p, "%s\"%V\":%uA", first ? "" : ",",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->stream_would_block[i]);
         first = 0;
     }
@@ -704,7 +704,7 @@ ngx_http_heavybag_status_json(u_char *p, u_char *last,
                          (ngx_atomic_uint_t) v->allowed);
         for (i = HEAVYBAG_REASON_NONE + 1, first = 1; i < HEAVYBAG_REASON_MAX; i++) {
             p = ngx_snprintf(p, last - p, "%s\"%V\":%uA", first ? "" : ",",
-                             &heavybag_reason_str[i],
+                             &ngx_http_heavybag_reason_str[i],
                              (ngx_atomic_uint_t) v->blocked[i]);
             first = 0;
         }
@@ -763,14 +763,14 @@ ngx_http_heavybag_status_prometheus(u_char *p, u_char *last,
     for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p,
                          "heavybag_http_blocked_total{reason=\"%V\"} %uA\n",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->http_blocked[i]);
     }
 
     for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p,
                          "heavybag_http_would_block_total{reason=\"%V\"} %uA\n",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->http_would_block[i]);
     }
 
@@ -800,7 +800,7 @@ ngx_http_heavybag_status_prometheus(u_char *p, u_char *last,
 
     for (i = 0; i < HEAVYBAG_UA_MAX; i++) {
         p = ngx_snprintf(p, last - p, "heavybag_ua_total{class=\"%V\"} %uA\n",
-                         &heavybag_type_str[i],
+                         &ngx_http_heavybag_type_str[i],
                          (ngx_atomic_uint_t) snap->http_ua[i]);
     }
 
@@ -823,14 +823,14 @@ ngx_http_heavybag_status_prometheus(u_char *p, u_char *last,
     for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p,
                          "heavybag_stream_denied_total{reason=\"%V\"} %uA\n",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->stream_denied[i]);
     }
 
     for (i = HEAVYBAG_REASON_NONE + 1; i < HEAVYBAG_REASON_MAX; i++) {
         p = ngx_snprintf(p, last - p,
                          "heavybag_stream_would_block_total{reason=\"%V\"} %uA\n",
-                         &heavybag_reason_str[i],
+                         &ngx_http_heavybag_reason_str[i],
                          (ngx_atomic_uint_t) snap->stream_would_block[i]);
     }
 
@@ -859,7 +859,7 @@ ngx_http_heavybag_status_prometheus(u_char *p, u_char *last,
             p = ngx_snprintf(p, last - p, "heavybag_vhost_blocked_total{server=\"");
             p = ngx_http_heavybag_prom_escape(p, last, name->data, name->len);
             p = ngx_snprintf(p, last - p, "\",reason=\"%V\"} %uA\n",
-                             &heavybag_reason_str[i],
+                             &ngx_http_heavybag_reason_str[i],
                              (ngx_atomic_uint_t) v->blocked[i]);
         }
     }
