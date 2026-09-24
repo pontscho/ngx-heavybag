@@ -1,7 +1,7 @@
 ---
 name: qa-findings
 type: analysis
-status: current
+status: active
 title: QA Findings Ledger & Fix Dispositions
 description: Severity-grouped findings from the WF-1/WF-2/WF-3 QA hardening campaign plus the fix-round dispositions, with current-code resolution status.
 sources:
@@ -11,9 +11,12 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_status.c
   - modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c
   - modules/ngx_http_heavybag/src/heavybag_rep.h
+  - modules/ngx_http_heavybag/src/heavybag_authhttp.c
+  - modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_flag_add
+  - modules/ngx_http_heavybag/src/heavybag_stream.c:ngx_stream_heavybag_handler
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: 2408c09
+  date: 2026-09-24
 links:
   - qa-subunit-inventory
   - qa-test-matrix
@@ -38,18 +41,25 @@ links:
 | **low** | Defensive-coding gap, narrow edge case, hard to trigger. |
 | **info** | Observation / maintainability / test-coverage note, no direct security impact. |
 
-## Resolution status (re-verified against current code, commit 7a935b0)
+## Resolution status (re-verified against current code, commit 2408c09)
 
 The findings below carry their original (pre-fix) line numbers. The fix-round
 dispositions further down were re-verified against the current tree; the
 confirmed-resolved items and their **current** anchors:
 
-- `ja4-01` (empty-list canonical JA4 `000000000000`) — **RESOLVED.** `ngx_http_heavybag_ja4_build` `modules/ngx_http_heavybag/src/heavybag_ja4.c:171` emits the FoxIO-canonical literal for an empty cipher list (JA4_b `modules/ngx_http_heavybag/src/heavybag_ja4.c:231`) and an empty ext+sigalg list (JA4_c `modules/ngx_http_heavybag/src/heavybag_ja4.c:268`). Original anchor `ja4.c:229-234,257-269`.
-- `config-01` / `module-cfg-v01` (`--without-http_ssl_module` build) — **RESOLVED.** The reason-filter pointer now lives OUTSIDE the `#if (NGX_HTTP_SSL)` guard with an explicit comment `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_next_reason_filter` (declared at module.c:45, installed at module.c:2978, dereferenced at module.c:3022/3038). Original anchor `module.c:39`.
-- `lifecycle-03` / `ja4flow-01` + spoof enforcement — **RESOLVED.** Spoof is no longer observability-only: enum `HEAVYBAG_REASON_SPOOF` `modules/ngx_http_heavybag/src/heavybag_rep.h:128`, enforced in PREACCESS `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:1139`, behind the `waf_spoof_block` directive `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:217`.
-- `rate-divzero-period0` + `rate-burst0-failclosed` — **RESOLVED.** Exported-API guards in `ngx_http_heavybag_rate_check` `modules/ngx_http_heavybag/src/heavybag_rate.c:127`: `period_ms == 0 → NGX_OK` (heavybag_rate.c:199), `burst_fp == 0 → NGX_OK` + one-time warn (heavybag_rate.c:202). Original anchor `rate.c:221`.
-- `observability-06` (Prometheus flag double-count) — **RESOLVED.** Distinct metric `heavybag_http_blocked_flag_total{flag=...}` `modules/ngx_http_heavybag/src/heavybag_status.c:666`. Original anchor `status.c:497-500` region.
-- `match` ReDoS foot-gun — **RESOLVED.** Bounded helper `ngx_http_heavybag_regex_exec` `modules/ngx_http_heavybag/src/heavybag_match.c:298` (PCRE2 match/depth limit; PCRE1 #else arm at :325) at both call sites — scanner/sig `modules/ngx_http_heavybag/src/heavybag_match.c:656` and `ua_classify` `modules/ngx_http_heavybag/src/heavybag_match.c:942`.
+- `ja4-01` (empty-list canonical JA4 `000000000000`) — **RESOLVED.** `ngx_http_heavybag_ja4_build` `modules/ngx_http_heavybag/src/heavybag_ja4.c:171` emits the FoxIO-canonical literal for an empty cipher list (JA4_b `modules/ngx_http_heavybag/src/heavybag_ja4.c:234`) and an empty ext+sigalg list (JA4_c `modules/ngx_http_heavybag/src/heavybag_ja4.c:268`). Original anchor `ja4.c:229-234,257-269`.
+- `config-01` / `module-cfg-v01` (`--without-http_ssl_module` build) — **RESOLVED.** The reason-filter pointer now lives OUTSIDE the `#if (NGX_HTTP_SSL)` guard with an explicit comment `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_next_reason_filter` (declared at module.c:43, installed at module.c:3014, dereferenced at module.c:3058/3074). Original anchor `module.c:39`.
+- `lifecycle-03` / `ja4flow-01` + spoof enforcement — **RESOLVED.** Spoof is no longer observability-only: enum `HEAVYBAG_REASON_SPOOF` `modules/ngx_http_heavybag/src/heavybag_rep.h:146`, enforced in PREACCESS `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:1192`, behind the `waf_spoof_block` directive `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:219`.
+- `rate-divzero-period0` + `rate-burst0-failclosed` — **RESOLVED.** Exported-API guards in `ngx_http_heavybag_rate_check` `modules/ngx_http_heavybag/src/heavybag_rate.c:253`: `period_ms == 0 → NGX_OK` (heavybag_rate.c:278), `burst_fp == 0 → NGX_OK` + one-time warn (heavybag_rate.c:281). Original anchor `rate.c:221`.
+- `observability-06` (Prometheus flag double-count) — **RESOLVED.** Distinct metric `heavybag_http_blocked_flag_total{flag=...}` `modules/ngx_http_heavybag/src/heavybag_status.c:786`. Original anchor `status.c:497-500` region.
+- `match` ReDoS foot-gun — **RESOLVED.** Bounded helper `ngx_http_heavybag_regex_exec` `modules/ngx_http_heavybag/src/heavybag_match.c:298` (PCRE2 match/depth limit) at both call sites — scanner/sig `modules/ngx_http_heavybag/src/heavybag_match.c:681` and `ua_classify` `modules/ngx_http_heavybag/src/heavybag_match.c:967`. The PCRE1 `#else` arm is now a build-time `#error` outside the unit-test TU (`modules/ngx_http_heavybag/src/heavybag_match.c:346`), so a shipped build can no longer fall back to the unbounded matcher.
+
+Dispositions the S9 fix series (the review artifacts under `docs/reviews/`) changed:
+
+- `authhttp-01` ("trust gate fail-open/safe intentional; no bypass") — **SUPERSEDED.** A loopback/unix peer alone no longer earns `Client-IP` trust: the caller must also present an `X-WAF-Key` that constant-time-matches `waf_mail_trusted_secret`, and every other case (no secret, key missing or mismatched, remote peer) judges the real connection peer `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_caller_trusted`, `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_secret_eq`. `waf_mail_failopen` (default on) still allows an *authenticated* request with a missing/unparseable `Client-IP`, by design `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_handler`.
+- `reputation-02` (unknown IP fails OPEN in block mode) — **UNCHANGED DEFAULT, now with an opt-in.** The default still lets a source with no geo record through (deny-list convention); the `unknown` token of `waf_flag_block` opts in to denying it `modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_flag_add`.
+- `module-phase-04` / `lifecycle-v01` — an allowlisted address with the default `full` scope now also skips the rate stage on the mail head `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_handler` and the stream head `modules/ngx_http_heavybag/src/heavybag_stream.c:ngx_stream_heavybag_handler`, matching the HTTP head.
+- `observability-05` (torn snapshot) — **STANDS, now stated in code.** The fixed counter section is copied field by field with one atomic read per counter, which rules out a torn *single* value but is explicitly NOT cross-counter consistent; per-vhost rows are still read live `modules/ngx_http_heavybag/src/heavybag_status.c:ngx_http_heavybag_stat_snapshot`. Separately, the render clamps the per-vhost walk to the smallest of the configured, server-array and segment vhost counts so a reload that adds `server{}` blocks cannot read past the segment `modules/ngx_http_heavybag/src/heavybag_status.c:ngx_http_heavybag_status_nvhosts`.
 
 Findings not confirmable from code alone (operator-config posture, accounting
 models, documented design intent) are left at their original disposition with

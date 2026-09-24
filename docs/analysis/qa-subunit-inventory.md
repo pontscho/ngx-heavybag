@@ -1,7 +1,7 @@
 ---
 name: qa-subunit-inventory
 type: analysis
-status: current
+status: active
 title: QA Subunit Inventory & Unit-Test Coverage
 description: Per-translation-unit line counts, unit-test presence, risk classification, and the known landmines for the ngx_http_heavybag module.
 sources:
@@ -17,10 +17,11 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_stream.c
   - modules/ngx_http_heavybag/src/heavybag_authhttp.c
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: 2408c09
+  date: 2026-09-24
 links:
   - qa-findings
+  - qa-test-matrix
   - overview
   - threat-model
 ---
@@ -55,6 +56,26 @@ links:
 | `heavybag_authhttp.c` | 321 | **none** | medium |
 
 **Headline gap:** 9 of 11 translation units have no unit tests — including the two highest-risk classes (geo memory-layout, shared-memory concurrency in rate/reputation/status).
+
+### Current unit-test coverage (re-checked at 2408c09)
+
+The table above is the 2026-06-17 recon and stays as recorded. Since then the
+test-matrix round ([[qa-test-matrix]]) and the S9 fix series closed most of the
+gap. Each of these TUs now has a unit suite that `#include`s the production
+`.c` directly:
+
+- `heavybag_rate.c` — `modules/ngx_http_heavybag/tests/unit/test-rate.c`, plus the concurrency bench `modules/ngx_http_heavybag/tests/unit/test-rate-stress.c`.
+- `heavybag_geo.c` — `modules/ngx_http_heavybag/tests/unit/test-geo.c`.
+- `heavybag_match.c` — `modules/ngx_http_heavybag/tests/unit/test-match.c` (PCRE2 arm) and `modules/ngx_http_heavybag/tests/unit/test-match-pcre1.c` (the PCRE1 arm, reachable only in the unit build because a shipped build `#error`s on it, `modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_regex_exec`).
+- `heavybag_reputation.c` — `modules/ngx_http_heavybag/tests/unit/test-reputation.c`.
+- `heavybag_status.c` (the cc table, field-wise snapshot and render clamp, not the HTTP handler) — `modules/ngx_http_heavybag/tests/unit/test-stat-cc.c`.
+- `heavybag_ja4.c` — `modules/ngx_http_heavybag/tests/unit/test-ja4.c` and `modules/ngx_http_heavybag/tests/unit/test-ja4-extract.c`.
+- `heavybag_ua_parse.c` — `modules/ngx_http_heavybag/tests/unit/test_heavybag_ua_parse.c`.
+
+Still **no unit suite** (covered only at the integration layer): `heavybag_spoof.c`,
+`heavybag_stream.c`, `heavybag_authhttp.c` (the mail trust model is netted by
+`modules/ngx_http_heavybag/tests/run-mailauth-fuzz.sh`), and
+`ngx_http_heavybag_module.c`.
 
 ## Known landmines (from prior work)
 

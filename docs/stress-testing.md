@@ -1,7 +1,7 @@
 ---
 name: stress-testing
 type: runbook
-status: stale
+status: active
 title: Stress & Load Testing Guide
 description: Operational how-to for running the heavybag stress/load campaign (install, run, tune, troubleshoot).
 sources:
@@ -10,8 +10,8 @@ sources:
   - modules/ngx_http_heavybag/tests/stress/heavybag-stress-test.conf
   - modules/ngx_http_heavybag/tools/gen-stress-corpus.pl
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: 2408c09
+  date: 2026-09-24
 links:
   - stress-campaign
   - overview
@@ -204,9 +204,20 @@ PASS means, on the counter delta around the concurrent mixed-load window:
 HTTP:   Δhttp_requests_total      == Δhttp_allowed   + Σ Δhttp_blocked[reason]
 STREAM: Δstream_connections_total == Δstream_allowed + Σ Δstream_denied[reason]
 MAIL:   Auth-Status shows deny for a blocklisted Client-IP and OK for an allowed one
-        (wire-only — the mail head moves no status counter)
+        (read off the wire; the probes run after the "after" snapshot)
 plus:   Δhttp_allowlist_hits ≤ Δhttp_allowed, and no counter delta is negative
 ```
+
+The mail verdict is read off the wire, but the mail head is not counter-free: it moves the same global `http_*`
+counters as the HTTP head (`modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_handler`).
+S3 closes its counter-delta snapshot *before* the mail probes run, so they never
+enter the HTTP invariant delta (`modules/ngx_http_heavybag/tests/run-stress-tests.sh`).
+The mail probes authenticate with `X-WAF-Key` against the stress conf's
+`waf_mail_trusted_secret`, because `Client-IP` is honoured only for an
+authenticated caller (`modules/ngx_http_heavybag/tests/stress/heavybag-stress-test.conf`,
+`modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_caller_trusted`);
+without the key every probe would be judged on the loopback peer and the
+allow/deny mix would collapse.
 
 Any mismatch is a real bug (a lost counter or a lock-free race), and the harness
 exits 1. The `would_block[*]` overlay, the `http_resp_*` / `http_scanner_path_*`
