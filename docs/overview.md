@@ -121,5 +121,5 @@ drift apart on inheritance or validation order.
 
 > Build, configuration, and the full directive reference are in the
 > repo-root `README.md` (linked, not duplicated here). The S6–S8 code and
-> security review reports and the fix task list sit under `docs/reviews/`
+> security review reports and the fix task list sit under `reviews/`
 > as review artifacts, outside the wiki's page contract.

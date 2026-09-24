@@ -1,6 +1,6 @@
 # Fix Plan — code review 2026-08-20 (modules/ngx_http_heavybag/src/)
 
-Source review: `docs/reviews/code-review-src-2026-08-20.md` (7 HIGH, 15 MEDIUM, 0 LOW; 24 verified, 0 refuted).
+Source review: `reviews/code-review-src-2026-08-20.md` (7 HIGH, 15 MEDIUM, 0 LOW; 24 verified, 0 refuted).
 Execution model: **parallel "raid" of Opus builder agents in waves.** Within a wave every task is
 **file-disjoint** — a file appears in exactly one task per wave. Waves are sequential barriers
 (wave N+1 starts only when wave N is green). One raider = one task.

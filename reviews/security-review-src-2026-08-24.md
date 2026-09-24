@@ -9,7 +9,7 @@
 | Date | 2026-08-24 (overnight cron-sliced run) |
 | Pipeline | Elliot (p:minion-inspector-security-officer) — FIND (5 OWASP/threat-surface lanes) → VERIFY (paranoid per-finding, fresh context) → Synthesize |
 | Method | Token-economy cron-sliced fan-out: 5 find lanes (one heavy officer per hourly slot) → 25 raw → 1 merge → 2 dropped → 22 verified |
-| Lens | Security only (exploitability, attacker-reachability, CWE, CVSS) — companion to the code-review at docs/reviews/code-review-src-2026-08-20.md |
+| Lens | Security only (exploitability, attacker-reachability, CWE, CVSS) — companion to the code-review at reviews/code-review-src-2026-08-20.md |
 | Scope note | This module runs as an EDGE firewall in front of a forward-proxy; all request-derived bytes are hostile input. Owner-authorized audit of a public open-source repo. |
 
 ## Overall security posture: SOUND, with hardening work
@@ -191,4 +191,4 @@ The code-review flagged 7 HIGH correctness defects, of which 4 were security-rel
 
 ---
 
-*Method note: this review ran as a token-economy cron-sliced Elliot pipeline overnight — 5 FIND lanes (memory-safety, untrusted-file parsing, auth/bypass, shm/concurrency, DoS/ReDoS) each writing a per-lane findings file, then 22 per-finding VERIFY passes in fresh contexts (paranoid re-judge with framework-default FP suppression). The generous-finder / paranoid-verifier split is why several alarming raw findings (the /status "CRITICAL" OOB, the ~10^9-step cookie DoS) were correctly downgraded or refuted with evidence. Companion to docs/reviews/code-review-src-2026-08-20.md.*
+*Method note: this review ran as a token-economy cron-sliced Elliot pipeline overnight — 5 FIND lanes (memory-safety, untrusted-file parsing, auth/bypass, shm/concurrency, DoS/ReDoS) each writing a per-lane findings file, then 22 per-finding VERIFY passes in fresh contexts (paranoid re-judge with framework-default FP suppression). The generous-finder / paranoid-verifier split is why several alarming raw findings (the /status "CRITICAL" OOB, the ~10^9-step cookie DoS) were correctly downgraded or refuted with evidence. Companion to reviews/code-review-src-2026-08-20.md.*

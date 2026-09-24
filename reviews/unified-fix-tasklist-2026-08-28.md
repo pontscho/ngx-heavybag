@@ -1,8 +1,8 @@
 # Unified Fix Task-List — heavybag WAF (`modules/ngx_http_heavybag/src/`)
 
 **Date:** 2026-08-28  
-**Merges:** `docs/reviews/code-review-src-2026-08-20.md` (S6 code review — 7 HIGH + 15 MEDIUM) + `docs/reviews/security-review-src-2026-08-24.md` (S7 security review — 9 VERIFIED / 3 ESCALATED / 10 SUPPRESSED).  
-**Skeleton:** the S6 fix-plan (`docs/reviews/code-review-fix-plan-2026-08-20.md`, waves T1–T8) is the raid scaffold; the security findings are overlaid onto it (severity reconciled, CWE added, new security-only subtasks folded into the owning file-task).  
+**Merges:** `reviews/code-review-src-2026-08-20.md` (S6 code review — 7 HIGH + 15 MEDIUM) + `reviews/security-review-src-2026-08-24.md` (S7 security review — 9 VERIFIED / 3 ESCALATED / 10 SUPPRESSED).  
+**Skeleton:** the S6 fix-plan (`reviews/code-review-fix-plan-2026-08-20.md`, waves T1–T8) is the raid scaffold; the security findings are overlaid onto it (severity reconciled, CWE added, new security-only subtasks folded into the owning file-task).  
 **Execution model:** parallel **raid** of Opus builder agents in **file-disjoint waves**. A file appears in exactly one task per wave. Waves are sequential barriers (wave N+1 starts only when wave N is green: `-Werror` build + full ctest). One raider = one task.  
 **IMPORTANT:** this is the task-list only — **do NOT implement the fixes yet**. ~~3 ESCALATED items~~ **SV11 is now RESOLVED** (2026-08-28, partner: multi-tenant host → shared-secret trust model, folded into T4.d). Two ESCALATED items remain (SV13, SV19) in the **DECISION NEEDED** section and must be settled by a human before any code change on their surface.
 
@@ -277,4 +277,4 @@ Each turns on deployment topology / production config / build policy. **Do not r
 
 **Verification tail (after the last wave — non-negotiable, per Zoltán's review-heavy workflow):** in parallel — (1) `p:minion-inspector-implementation` against this list; (2) `p:minion-inspector-security-officer` PHASE:triage on the diff; (3) re-run the Elliot PHASE:verify for each MEDIUM/HIGH finding on the fixed code (SV8/SV9/SV14/SV16 + H1/H5/H6/H7 → expect REFUTED = fixed). Then full ctest + sandbox smoke, deployed `.so` md5 noted.
 
-**Out of raid scope:** commit + push (partner does it — SSH key); the `docs/reviews/` artifacts are untracked.
+**Out of raid scope:** commit + push (partner does it — SSH key); the `reviews/` artifacts are untracked.
