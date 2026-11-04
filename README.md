@@ -179,26 +179,31 @@ trees, no manual `./configure` dance.
   (ReDoS). Building against an `--with-pcre` (PCRE1) nginx therefore fails
   loudly at compile time rather than shipping an unbounded matcher.
 - Everything else is fetched and built by CMake:
-  - **OpenSSL 3.5.7** — built from source and statically linked, because
+  - **OpenSSL 3.5.9** — built from source and statically linked, because
     native QUIC needs OpenSSL ≥ 3.5 (the host's 3.0.2 is too old). nginx
     builds it in-tree via `--with-openssl=<src>`.
   - **zlib-ng 2.3.3** — built statically (`--zlib-compat --static`) and
     linked in place of the system dynamic zlib.
-  - **nginx 1.31.3** — configured with the full flag set and the heavybag module
-    as a dynamic add-on. The 1.31.3 mainline release (15 Jul 2026) fixes three
-    more memory-corruption CVEs relevant to an edge proxy — a heap overflow in
-    the `map` directive's regex handling (CVE-2026-42533, directly relevant to
-    the WAF's regex maps), a use-after-free in `ngx_http_ssi_filter_module` on
-    crafted proxied responses (CVE-2026-56434), and an uninitialized-memory
-    disclosure via unnamed regex captures (CVE-2026-60005).
+  - **nginx 1.31.8** — configured with the full flag set and the heavybag module
+    as a dynamic add-on. 1.31.6 and 1.31.7 fix six advisories that affect the
+    previous pin 1.31.3, among them an HTTP/3 request-body injection
+    (CVE-2026-95101); the list is in `docs/threat-intel-sources.md` §8. The
+    module `.so` is ABI-bound to the nginx version it was built against, so
+    rebuild it after every nginx bump (`docs/runbooks/build-matrix.md`).
+    The earlier 1.31.3 release had already fixed three memory-corruption CVEs
+    relevant to an edge proxy: a heap overflow in the `map` directive's regex
+    handling (CVE-2026-42533, directly relevant to the WAF's regex maps), a
+    use-after-free in `ngx_http_ssi_filter_module` on crafted proxied
+    responses (CVE-2026-56434), and an uninitialized-memory disclosure via
+    unnamed regex captures (CVE-2026-60005).
 
 Versions and URLs are pinned in [`cmake/Versions.cmake`](cmake/Versions.cmake);
 bump a `PKG_*_VERSION` there (or pass `-DPKG_*_VERSION=…`) to change a
 dependency — that is the whole edit. The matching SHA256 is resolved
 automatically (the tarball is fetched once into `build/dl-cache/`, hashed, and
 reused), so no hash is pasted by hand; pass `-D<DEP>_SHA256=<hex>` to pin one
-explicitly for an audited build. PCRE2 stays at the bundled 10.47 (current
-stable; built in-tree with JIT).
+explicitly for an audited build. PCRE2 is pinned at 10.49 (built in-tree with
+JIT).
 
 ### One-shot build
 
@@ -210,7 +215,7 @@ cmake --build build -j
 This installs, into the `sandbox/` tree (the nginx prefix), at stable
 repo-relative paths:
 
-- `sandbox/sbin/nginx` — the binary (OpenSSL 3.5.7 + static zlib-ng)
+- `sandbox/sbin/nginx` — the binary (OpenSSL 3.5.9 + static zlib-ng)
 - `sandbox/modules/ngx_http_heavybag_module.so` — the heavybag dynamic module
 
 (`sandbox/` doubles as the build install prefix and the runnable test env;
@@ -238,7 +243,7 @@ It runs `make modules` in the already-built nginx tree and copies the fresh
 ### Verifying the build
 
 ```sh
-sandbox/sbin/nginx -V                 # OpenSSL 3.5.7, --with-http_v3_module, --with-mail
+sandbox/sbin/nginx -V                 # OpenSSL 3.5.9, --with-http_v3_module, --with-mail
 ldd sandbox/sbin/nginx                # no libz.so -> zlib-ng is static
 strings sandbox/sbin/nginx | grep -i zlib-ng
 ```

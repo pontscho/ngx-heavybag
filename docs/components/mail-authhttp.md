@@ -16,7 +16,7 @@ sources:
   - modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_set_mail_secret
   - modules/ngx_http_heavybag/tests/unit/test-authhttp.c
 verified:
-  commit: c131f98
+  commit: 35d6bb3
   date: 2026-11-04
 links:
   - overview

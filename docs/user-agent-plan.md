@@ -10,10 +10,11 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_ja4.c
   - modules/ngx_http_heavybag/lists/ja4.list
 verified:
-  commit: c131f98
+  commit: 35d6bb3
   date: 2026-11-04
 links:
   - overview
+  - threat-intel-sources
 ---
 # Implementation Plan: User-Agent Descriptive Parser + JA4/UA Spoof Detection for heavybag
 
@@ -77,7 +78,7 @@ rate-limit keys, etc.).
 - The Phase 0 definition research is complete (captured in this plan) and is the source for the curated token additions and the ja4db normalization rule.
 - The descriptive parser runs lazily, guarded by a new `ua_parsed:1` bit, mirroring the existing `classified:1` pattern.
 - JA4 family granularity is coarse: a single `chromium` family covers Chrome/Edge/Brave/Opera/Vivaldi/Samsung/YaBrowser, because their TLS fingerprints are near-identical.
-- The ja4db import is committed as a generated `lists/ja4.list`; the import/normalization is a one-time offline step re-runnable when the DB updates.
+- The ja4db import is committed as a generated `lists/ja4.list`; the import/normalization is a one-time offline step re-runnable when the DB updates. (Re-checked 2026-11-04: the public export the generator reads has been frozen since 2026-05-15 because JA4DB is no longer open source, so a re-run reproduces the existing table; `modules/ngx_http_heavybag/tools/regen-ja4-list.py`, [[threat-intel-sources]] §7.1.)
 
 **Constraints:**
 - **No Docker, no external CLI dependency, no network access at build time** (project rule). The ja4db import is performed offline and the result committed.
