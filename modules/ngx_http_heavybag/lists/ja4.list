@@ -13,9 +13,11 @@
 #
 # ---------------------------------------------------------------------------
 # GENERATED -- do not hand-edit. Built by tools/regen-ja4-list.py from ja4db
-# CSV exports (Niicolaa/ja4db-export, a daily mirror of ja4db.com, + the
-# official FoxIO-LLC/ja4 ja4plus-mapping.csv -- ja4db.com itself is unreachable
-# from the build host). See that script's header for the refresh procedure.
+# CSV exports (Niicolaa/ja4db-export, a mirror of ja4db.com that is FROZEN since
+# 2026-05-15 -- JA4DB is no longer open source, so no fresher public export
+# exists -- + the official FoxIO-LLC/ja4 ja4plus-mapping.csv; ja4db.com itself
+# is unreachable from the build host). See that script's header for the
+# refresh procedure.
 # Family mapping: the curated application/library label when present, else the
 # observed user_agent_string (engine family only) -> tool/bot/chromium/firefox/
 # safari. The UA fallback is what gives broad coverage; the curated label is
