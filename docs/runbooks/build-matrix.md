@@ -3,7 +3,7 @@ name: build-matrix
 type: runbook
 status: active
 title: Build-portability matrix (heavybag_build_matrix)
-description: What run-build-matrix.sh asserts, its configure permutations, tree bootstrap, the expected --without-pcre abort, and the heavybag_module self-heal.
+description: What run-build-matrix.sh asserts, its configure permutations, tree bootstrap, the expected --without-pcre abort, the heavybag_module self-heal, and the dependency pins with the per-nginx-version rebuild rule.
 sources:
   - modules/ngx_http_heavybag/tests/run-build-matrix.sh
   - modules/ngx_http_heavybag/tests/run-build-matrix.sh:build_tree
@@ -11,13 +11,15 @@ sources:
   - modules/ngx_http_heavybag/tests/run-build-matrix.sh:bootstrap
   - cmake/Tests.cmake
   - CMakeLists.txt
+  - cmake/Versions.cmake
 verified:
-  commit: 10bc7ea
-  date: 2026-09-24
+  commit: 35d6bb3
+  date: 2026-11-04
 links:
   - overview
   - qa-test-matrix
   - qa-findings
+  - threat-intel-sources
 ---
 
 # Build-portability matrix (heavybag_build_matrix)
@@ -138,6 +140,35 @@ copies the `.so` into `sandbox/modules/` `CMakeLists.txt:heavybag_module`. You
 only pay for that re-configure after a matrix run. Ordinary iterations skip
 straight to the build. As always, a rebuilt `.so` needs a full nginx stop and
 start, because `nginx -s reload` does not reload module code `CMakeLists.txt`.
+
+## Dependency pins and nginx upgrades
+
+The super-build pins nginx 1.31.8, OpenSSL 3.5.9 and PCRE2 10.49 (raised from
+1.31.3 / 3.5.7 / 10.47 for the advisories in [[threat-intel-sources]] §8)
+`cmake/Versions.cmake`. Bumping one is a one-line edit of its `PKG_*_VERSION`
+there; the tarball SHA256 is resolved on the next configure
+`cmake/Versions.cmake:resolve_sha256`.
+
+**Rebuild the module for every nginx version.** The `.so` is ABI-bound to the
+nginx it was built against: nginx 1.31.5 changed the layout of
+`ngx_http_core_loc_conf_t` without padding (researched 2026-11-04), so a module
+built against another nginx version must not be loaded. A version bump
+therefore means a full CMake build plus this matrix, never a copied `.so`.
+The source audit for the 1.31.8 bump: the module uses no `ngx_http_script_*`,
+`ngx_json_*`, `ngx_http_upstream_state_t` or `r->main->blocked`, and of
+`ngx_http_core_loc_conf_t` it sets only the `handler` field, in the
+`waf_mail_auth` and `waf_status` setters
+`modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_set_mail_auth`,
+`modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_set_status`.
+
+nginx behaviour changes between 1.31.3 and 1.31.8 that an edge config can
+notice (researched 2026-11-04, not code-verified):
+
+- `Host` / `:authority` is always sent to the backend. `proxy_set_header Host ""`
+  no longer drops the header: it yields `$proxy_host`.
+- `working_directory` is resolved relative to the prefix, and an invalid path
+  is rejected at config load instead of at run time.
+- HTTP/2 uses the RFC 9218 priority scheme.
 
 The phase that introduced the matrix, and the findings it nets, are recorded in
 [[qa-test-matrix]] and [[qa-findings]].

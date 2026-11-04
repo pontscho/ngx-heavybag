@@ -10,7 +10,7 @@ sources:
   - modules/ngx_http_heavybag/tests/run-replay-tests.sh
   - modules/ngx_http_heavybag/tests/heavybag-replay-test.conf
 verified:
-  commit: c131f98
+  commit: 35d6bb3
   date: 2026-11-04
 links:
   - threat-model
@@ -69,6 +69,13 @@ gap-analysis loop (the same loop that took path coverage 18.1% → 24.8%).
 `ngx_http_heavybag_module.c`): reputation (857) → method (891) → rate (927) → **UA-bot
 (967) → fake-bot (996) → scanner-path (1018) → args (1063) → cookie (1082) →
 referer (1100)**; each hit `return`s immediately (first-match-wins). Consequences:
+
+> **Re-checked 2026-11-04 (35d6bb3).** The parenthesised line numbers are the
+> plan-time snapshot and no longer match the file. The order still holds, with
+> one stage the plan predates: a UA/TLS **spoof** stage (`waf_spoof_block`,
+> reason `spoof`) now sits between rate and UA-bot
+> `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_preaccess_handler`.
+> It is off unless configured, so the replay vhosts below are unaffected.
 
 - UA-bot (967) precedes scanner-path (1018): with `waf_bot_block on`, the ~30%
   empty-UA traffic lands in `would_block[empty_ua]`, masking the path signal.

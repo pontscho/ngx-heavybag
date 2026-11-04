@@ -14,12 +14,14 @@ sources:
   - modules/ngx_http_heavybag/lists/verified-crawler.list
   - modules/ngx_http_heavybag/tools/regen-ja4-list.py
   - modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_verified_bot_compile
+  - cmake/Versions.cmake
 verified:
-  commit: c131f98
+  commit: 35d6bb3
   date: 2026-11-04
 links:
   - threat-model
   - honeypot-B-plan
+  - build-matrix
 ---
 # External Threat-Intel Sources for Header-Attack Fixtures
 
@@ -193,8 +195,10 @@ builds the header fixtures from the older data.
 `modules/ngx_http_heavybag/tools/regen-ja4-list.py`, ingests the Niicolaa export
 plus the FoxIO mapping. The export is frozen and the mapping has not moved, so a
 re-run reproduces the existing table at best. A new JA4 source is an open data
-gap (§4). The generator's docstring and the `ja4.list` header still describe
-the export as "a daily mirror".
+gap (§4). The generator's docstring and the generated `ja4.list` header both
+record that the export is frozen since 2026-05-15
+(`modules/ngx_http_heavybag/tools/regen-ja4-list.py`,
+`modules/ngx_http_heavybag/lists/ja4.list`).
 
 ### 7.2 Verified-crawler IP-range endpoints (fake-bot CIDR half)
 
@@ -205,7 +209,8 @@ The module never parses JSON; the list is produced offline from the operators'
 published JSON ranges. **No in-repo fetcher exists**: `README.md` and the
 `modules/ngx_http_heavybag/lists/verified-crawler.list` header describe an
 offline cron job, but no script under `modules/ngx_http_heavybag/tools/`
-implements it. Both still name Google's `googlebot.json`.
+implements it. Both name Google's current `common-crawlers.json` endpoint and
+note its 2026-03-31 rename from `googlebot.json`.
 
 Endpoints confirmed live on 2026-11-04 (researched, not code-verified):
 
@@ -220,6 +225,18 @@ Endpoints confirmed live on 2026-11-04 (researched, not code-verified):
 | DuckDuckGo | https://duckduckgo.com/duckduckbot.json | |
 | Mistral | `mistral.ai/mistralai-user-ips.json` | |
 
+**Per-operator range verification is not built, by decision (researched
+2026-11-04, not code-verified).** On the live edge no claimed-bot request
+reached the upstream with a 200, and about 99% of claimed-bot traffic came from
+the wrong ASN, almost all of it one GCP fleet (AS396982) rotating its UA
+([[threat-model]] §8). Under the production `waf_geo_whitelist HU LU` that
+traffic is already refused by the reputation stage, which runs before the
+fake-bot stage
+(`modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_preaccess_handler`),
+so a per-operator
+CIDR/ASN fetcher for the endpoints above was judged not worth building.
+Revisit it if the whitelist is relaxed.
+
 ### 7.3 Geo DB
 
 `geodb/location.db` (gitignored, downloaded) was refreshed from upstream on
@@ -228,3 +245,28 @@ copy (2026-06-12, 63,517,012 bytes) is kept as `geodb/location.db.prev-20260612`
 The geo-dependent integration suites validate their ground truth against the DB
 at run time and SKIP when it has drifted from the baked conf, so re-run them
 after the swap (see [[qa-test-matrix]]).
+
+## 8. nginx security advisories behind the build pin
+
+**Researched 2026-11-04, not code-verified.** Source:
+https://nginx.org/en/security_advisories.html. The build pins nginx in
+`cmake/Versions.cmake` (pin history and the per-version rebuild rule are in
+[[build-matrix]]). These advisories affect the previous pin, 1.31.3, and are
+fixed in 1.31.6 / 1.31.7:
+
+| CVE | What | Exposure condition |
+|---|---|---|
+| CVE-2026-95101 | `ngx_http_v3` request-body injection | HTTP/3 with `proxy_request_buffering on` |
+| CVE-2026-90439 | `ngx_http_v3` heap overflow | HTTP/3 built against OpenSSL 3.5.0 or older |
+| CVE-2026-15176 | see the advisory page | config-dependent |
+| CVE-2026-93479 | see the advisory page | config-dependent |
+| CVE-2026-97629 | see the advisory page | config-dependent |
+| CVE-2026-97205 | see the advisory page | config-dependent |
+
+The canonical configure line enables `--with-http_v3_module`
+(`CMakeLists.txt`), so the HTTP/3 body-injection advisory is in scope for any
+edge still on 1.31.3 that buffers request bodies. The heap overflow needs
+OpenSSL 3.5.0 or older, which the pinned OpenSSL (`cmake/Versions.cmake`) is
+not, so it matters only for a downstream build against an older OpenSSL. The
+remaining four depend on directives an operator may or may not use; check the
+advisory page against the deployed config.

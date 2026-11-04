@@ -13,12 +13,13 @@ sources:
   - modules/ngx_http_heavybag/tests/corpus/regression-headers.jsonl
   - reference/geolookup.c
 verified:
-  commit: c131f98
+  commit: 35d6bb3
   date: 2026-11-04
 links:
   - threat-intel-sources
   - honeypot-B-plan
   - overview
+  - qa-subunit-inventory
 ---
 # Edge Threat Model & Honeypot Analysis
 
@@ -471,7 +472,9 @@ and only the aggregated TSV came back, so the raw log never left the edge. The
 working report was ephemeral (a `/tmp` scratch file) and is summarised here, not
 linked.
 
-Findings that change how the numbers in this page should be read:
+Findings that change how the numbers in this page should be read (all
+researched 2026-11-04, including the reading of the production config; the
+inline anchors show where the module acts, not what production runs):
 
 - **A 404 is a weak scanner signal on this edge.** The edge answers `/` itself
   with 404, so a high per-client 404 rate does not, by itself, separate a scanner
@@ -487,10 +490,34 @@ Findings that change how the numbers in this page should be read:
   published-range list for the class, and these names were not in
   `ai-crawler.list` before the 2026-11 sync. The same blind spot as §5.2, from
   the other side.
-- **Blocks are rare in the new-format era.** 309 `scanner_*` blocks against
-  ~100k scanner-typed lines. The cause is not verified (mode, list coverage and
-  the 404-for-`/` backdrop are all candidates). Do not read it as a coverage
-  figure.
+- **`scanner_*` blocks are rare in the new-format era, and that is the
+  production config, not a coverage gap.** 309 `scanner_*` blocks against
+  ~100k scanner-typed lines. Production runs `enforce` with
+  `waf_geo_whitelist HU LU` at `http` level and `waf_bot_block on`. The geo
+  whitelist is part of the reputation stage, which runs first in PREACCESS,
+  ahead of the UA, fake-bot and path stages
+  `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_preaccess_handler`,
+  `modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_reputation_check`.
+  So a foreign scanner is logged `waf=geo_whitelist` (a 404), and
+  `scanner_ua` / `scanner_path` can fire only for HU/LU sources. Do not read
+  the `scanner_*` count as a coverage figure.
+- **Rewrite-phase `return`s bypass the WAF.** heavybag judges in PREACCESS
+  `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_postconfiguration`,
+  so a `return` in a server or location block (rewrite phase) finalizes the
+  request before any verdict. On this edge that covers the port-80 301, the
+  direct-IP guard, the app locations and the safranek `/`. A prepared fix
+  pattern that keeps the redirect but routes it through PREACCESS:
+  `error_page 418 =301 <url>; recursive_error_pages on; try_files /__waf_no_such_path__ =418;`.
+  `try_files` runs in PRECONTENT, after PREACCESS, so the verdict happens
+  first. The `@named`-location variant does not work: the internal redirect
+  wipes the module ctx and the line logs `waf=none` (the `r->ctx` landmine in
+  [[qa-subunit-inventory]]).
+- **Bot-identity spoofing does not reach the upstream.** No claimed-bot
+  request reached the upstream with a 200. About 99% of claimed-bot traffic
+  came from the wrong ASN, almost all of it a single GCP fleet (AS396982)
+  rotating UAs. Per-operator CIDR/ASN verification was therefore judged not
+  worth building under the HU/LU whitelist; revisit it if the whitelist is
+  relaxed ([[threat-intel-sources]] §7.2).
 
 The pass fed the `2026-11 live-log mining (edge v, 2026-06..11)` sections of
 `modules/ngx_http_heavybag/lists/ai-crawler.list`,

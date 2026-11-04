@@ -7,9 +7,10 @@ description: What heavybag is, its architecture, and the map to every wiki page.
 sources:
   - README.md
   - modules/ngx_http_heavybag/config
+  - cmake/Versions.cmake
 verified:
-  commit: 10bc7ea
-  date: 2026-09-24
+  commit: 35d6bb3
+  date: 2026-11-04
 links:
   - threat-model
   - mail-authhttp
@@ -86,6 +87,16 @@ drift apart on inheritance or validation order.
   `modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_regex_exec`
   has a PCRE2 arm with match/depth limits; the PCRE1 arm is an `#error` outside
   the unit-test build.
+- **The `.so` is bound to one nginx version.** nginx, OpenSSL and PCRE2 are
+  pinned in `cmake/Versions.cmake`, and the module must be rebuilt for every
+  nginx bump rather than copied across versions `README.md`. Details and the
+  pin rationale in [[build-matrix]].
+- **Per-flag block counters count bits, not requests.** A request matching two
+  network-flag bits bumps two per-flag slots, and a flag verdict that carries
+  no bit (the `unknown` deny, or a `flag_cc` code such as Tor's `T1`) bumps
+  none, so the per-flag sum does not reconcile with the `flag` reason total
+  `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_preaccess_handler`,
+  `modules/ngx_http_heavybag/src/heavybag_status.c`, `README.md`.
 
 ## Subsystems (by source directory)
 

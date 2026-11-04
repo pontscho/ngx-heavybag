@@ -18,7 +18,7 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_authhttp.c
   - modules/ngx_http_heavybag/tests/unit/test-authhttp.c
 verified:
-  commit: c131f98
+  commit: 35d6bb3
   date: 2026-11-04
 links:
   - qa-findings
@@ -58,7 +58,7 @@ links:
 
 **Headline gap:** 9 of 11 translation units have no unit tests — including the two highest-risk classes (geo memory-layout, shared-memory concurrency in rate/reputation/status).
 
-### Current unit-test coverage (re-checked at c131f98)
+### Current unit-test coverage (re-checked at 35d6bb3)
 
 The table above is the 2026-06-17 recon and stays as recorded. Since then the
 test-matrix round ([[qa-test-matrix]]) and the S9 fix series closed most of the
@@ -77,7 +77,13 @@ gap. Each of these TUs now has a unit suite that `#include`s the production
 Still **no unit suite** (covered only at the integration layer): `heavybag_spoof.c`,
 `heavybag_stream.c`, the rest of `heavybag_authhttp.c` (the mail trust model is netted by
 `modules/ngx_http_heavybag/tests/run-mailauth-fuzz.sh`), and
-`ngx_http_heavybag_module.c`.
+`ngx_http_heavybag_module.c`. The module TU's per-country accounting is netted
+at the integration layer: the detect arm of
+`modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_finalize_decision`
+books the country from the verdict's own geo result, and the `geoacct.test`
+vhost of `modules/ngx_http_heavybag/tests/heavybag-stat-test.conf` asserts that
+a blocklist early return, with or without a rewrite-phase `$waf_country` read,
+books no country (`modules/ngx_http_heavybag/tests/run-stat-tests.sh`).
 
 ## Known landmines (from prior work)
 
