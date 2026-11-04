@@ -48,6 +48,7 @@ NGINX=$ROOT/sandbox/sbin/nginx
 TOUCH_GUARD=$ROOT/build/ssl-touch-guard.sh
 MODDIR=$ROOT/modules/ngx_http_heavybag
 SONAME=ngx_http_heavybag_module.so
+ADDON_CONFIG=$MODDIR/config
 
 pass=0; fail=0; skip=0
 ok()   { echo "  PASS: $1"; pass=$((pass+1)); }
@@ -76,7 +77,12 @@ bootstrap() {  # <builddir> <sed-transform-of-BASE_ARGS>
 # build a tree's modules + assert. Args: label dir [bootstrap-xform]
 build_tree() {
     local label=$1 dir=$2 xform=${3:-}
-    if [ ! -f "$NSRC/$dir/Makefile" ]; then
+    # also re-configure a variant tree whose Makefile predates the addon `config`
+    # (its ngx_module_libs decision is baked in at configure time)
+    local stale=no
+    [ -n "$xform" ] && [ -f "$NSRC/$dir/Makefile" ] \
+        && [ "$ADDON_CONFIG" -nt "$NSRC/$dir/Makefile" ] && stale=yes
+    if [ ! -f "$NSRC/$dir/Makefile" ] || [ "$stale" = yes ]; then
         if [ -n "$xform" ]; then
             bootstrap "$dir" "$xform" || { bad "$label: bootstrap configure failed" "$(tail -3 "$NSRC/$dir.configure.log")"; return; }
         else
@@ -118,19 +124,24 @@ sym_tree() {
             || bad "$label: $n undefined SSL_* symbol(s) in a non-SSL build" "$(nm -D "$so" | awk '$1=="U" && $2 ~ /^SSL_/')"
     fi
     # geo.c verifies the location.db signature with OpenSSL libcrypto
-    # (EVP/PEM/ECDSA), UNCONDITIONALLY -- so EVERY variant's .so must carry a
-    # DT_NEEDED libcrypto, else those symbols are undefined at dlopen in an
-    # nginx with no other libcrypto consumer (e.g. --without-http_ssl_module).
-    # NOTE: a shared object keeps libcrypto symbols as 'U' in .dynsym even when
-    # linked with -lcrypto (definitions are NOT copied across .so boundaries);
-    # the fix's observable, assertable effect is the DT_NEEDED entry, NOT the
-    # disappearance of the undefined EVP_*/PEM_* symbols. The old SSL_*-only
-    # undef filter above never saw the geo crypto symbols, so this is the
-    # regression net for the `ngx_module_libs="-lcrypto"` build fix (config).
+    # (EVP/PEM/ECDSA). Contract (config: ngx_module_libs keyed on USE_OPENSSL):
+    #   - nginx WITHOUT OpenSSL (nossl=yes): the .so MUST carry DT_NEEDED
+    #     libcrypto, else those symbols are undefined at dlopen.
+    #   - nginx WITH embedded OpenSSL (nossl=no): the .so must NOT carry it, so
+    #     the symbols resolve from the nginx executable only (no second,
+    #     system libcrypto loaded beside nginx's static one).
+    # NOTE: libcrypto symbols stay 'U' in .dynsym either way; the observable,
+    # assertable effect is the DT_NEEDED entry.
     local crypto; crypto=$(readelf -d "$so" 2>/dev/null | grep -c 'NEEDED.*libcrypto')
-    [ "${crypto:-0}" -ge 1 ] \
-        && ok "$label: DT_NEEDED libcrypto present (geo.c EVP/PEM/ECDSA resolvable at dlopen)" \
-        || bad "$label: NO DT_NEEDED libcrypto -- geo.c crypto symbols would be undefined at dlopen in a non-SSL nginx (ngx_module_libs missing -lcrypto?)"
+    if [ "$nossl" = yes ]; then
+        [ "${crypto:-0}" -ge 1 ] \
+            && ok "$label: DT_NEEDED libcrypto present (non-SSL nginx: geo.c EVP/PEM/ECDSA resolvable at dlopen)" \
+            || bad "$label: NO DT_NEEDED libcrypto -- geo.c crypto symbols would be undefined at dlopen in a non-SSL nginx (config: ngx_module_libs missing -lcrypto?)"
+    else
+        [ "${crypto:-0}" -eq 0 ] \
+            && ok "$label: no DT_NEEDED libcrypto (SSL nginx: OpenSSL symbols resolve from the nginx executable only)" \
+            || bad "$label: DT_NEEDED libcrypto present on an SSL build -- a second system libcrypto would be loaded next to nginx's static OpenSSL (config: -lcrypto must be conditional on USE_OPENSSL)"
+    fi
 }
 
 echo "=== WAF build-portability matrix ==="

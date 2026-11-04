@@ -221,7 +221,8 @@ ngx_http_heavybag_geo_ipv4root(const u_char *nt, uint32_t ntlen, uint32_t *root)
 /*
  * Verify the database's embedded ECDSA P-521 / SHA-512 signature against the
  * pinned IPFire public key -- libloc loc_database_verify() reproduced with
- * OpenSSL (libcrypto is already linked, see heavybag_ja4.c; no libloc dependency).
+ * OpenSSL (resolved from nginx's embedded OpenSSL, or -lcrypto on a non-SSL nginx, see
+ * config; no libloc dependency).
  *
  * Mandatory and fail-closed: an unsigned (both slots absent), tampered, or
  * corrupted DB, or ANY OpenSSL error, returns NGX_ERROR. The hashed message

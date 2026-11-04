@@ -7,10 +7,13 @@
 #
 # PCRE2 comes from nginx's own ngx_regex (already linked). The geo reader is
 # the embedded nanolibloc adaptation, but it verifies the location.db signature
-# (ECDSA P-521 / SHA-512) with OpenSSL libcrypto (EVP/PEM), so ngx_module_libs
-# must carry -lcrypto -- otherwise an nginx built --without-http_ssl_module (and
-# with no other libcrypto consumer) hits undefined EVP_*/PEM_* symbols at
-# dlopen. Requires nginx built --with-stream.
+# (ECDSA P-521 / SHA-512) with OpenSSL libcrypto (EVP/PEM). When nginx embeds
+# OpenSSL (USE_OPENSSL=YES: any of http/mail/stream ssl, http_v3) the module
+# resolves those symbols from the nginx executable and MUST NOT carry
+# DT_NEEDED libcrypto (a second, system libcrypto would be loaded next to
+# nginx's static one). Only an nginx without OpenSSL gets -lcrypto in
+# ngx_module_libs, else EVP_*/PEM_* are undefined at dlopen. Requires nginx
+# built --with-stream.
 
 ngx_addon_name=ngx_http_heavybag_module
 
@@ -57,7 +60,13 @@ if test -n "$ngx_module_link"; then
     ngx_module_incs="$ngx_addon_dir/src"
     ngx_module_deps="$heavybag_deps"
     ngx_module_srcs="$heavybag_srcs"
-    ngx_module_libs="-lcrypto"   # geo.c: location.db ECDSA-P521/SHA-512 verify
+    # geo.c: location.db ECDSA-P521/SHA-512 verify. USE_OPENSSL is final here
+    # (auto/modules sets it for http/mail/stream ssl before addons are sourced).
+    if [ "$USE_OPENSSL" = YES ]; then
+        ngx_module_libs=
+    else
+        ngx_module_libs="-lcrypto"
+    fi
     . auto/module
 else
     HTTP_MODULES="$HTTP_MODULES ngx_http_heavybag_module"

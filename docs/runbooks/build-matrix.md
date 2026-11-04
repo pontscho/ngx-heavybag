@@ -68,13 +68,15 @@ Then `modules/ngx_http_heavybag/tests/run-build-matrix.sh:sym_tree` inspects the
 - `ngx_stream_heavybag_module` is exported by every variant **except**
   `objs-nostream`, where it must be absent;
 - the `objs-nossl` `.so` has **zero undefined `SSL_*` symbols**;
-- every variant's `.so` carries a `DT_NEEDED` entry for libcrypto (`readelf -d`).
+- the `DT_NEEDED` libcrypto entry (`readelf -d`) is present **iff** nginx was
+  built without OpenSSL (`objs-nossl`), and absent on every SSL variant.
   The geo reader verifies the `location.db` signature with libcrypto
-  unconditionally `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_verify`,
-  so a variant without the entry would hit undefined EVP/PEM symbols at
-  `dlopen` in an nginx with no other libcrypto consumer. The observable effect
-  of the `-lcrypto` build fix is the `DT_NEEDED` entry. The undefined `EVP_*`
-  symbols stay in `.dynsym` either way.
+  `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_verify`.
+  The module `config` adds `-lcrypto` only when `USE_OPENSSL` is not `YES`
+  (without OpenSSL the EVP/PEM symbols would be undefined at `dlopen`); on SSL
+  builds the symbols resolve from the nginx executable's embedded OpenSSL, and
+  a `DT_NEEDED` entry would load a second (system) libcrypto into the process.
+  The undefined `EVP_*` symbols stay in `.dynsym` either way.
 
 Exit 0 means every buildable permutation built clean and every symbol
 assertion held. The final `RESULT` line prints the pass/fail/skip tally
