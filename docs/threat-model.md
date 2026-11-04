@@ -5,14 +5,16 @@ status: active
 title: Edge Threat Model & Honeypot Analysis
 description: Empirical attack-surface analysis over the 1.65M-request edge log corpus driving scanners.list and geo/ASN tuning.
 sources:
-  - ngxlogs/access.log
   - modules/ngx_http_heavybag/lists/scanners.list
   - modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_scanner_lookup
   - modules/ngx_http_heavybag/src/heavybag_geo.c
+  - modules/ngx_http_heavybag/src/heavybag_ua_parse.c:ngx_http_heavybag_ua_spoof_eval
+  - modules/ngx_http_heavybag/tests/corpus/regression-vectors.jsonl
+  - modules/ngx_http_heavybag/tests/corpus/regression-headers.jsonl
   - reference/geolookup.c
 verified:
-  commit: 10bc7ea
-  date: 2026-09-24
+  commit: c131f98
+  date: 2026-11-04
 links:
   - threat-intel-sources
   - honeypot-B-plan
@@ -24,7 +26,13 @@ links:
 **Data source:** `ngxlogs/access.log` + `error.log` — the real production logs of
 this edge (`203.0.113.10`, `example.com`), **1,651,507 HTTP requests over
 ~3 years 10 months** (2022-08-22 → 2026-06-13), captured **before** heavybag was
-ever enforcing. Every number below is measured directly from that corpus.
+ever enforcing. Every corpus number in §1–§5 is a **dated measurement of that
+frozen capture** (2026-06 snapshot), not a re-rendered value: `ngxlogs/` is
+gitignored (`.gitignore`), so the log is a local artifact that git — and the
+wiki's freshness check — cannot track, and a fresh clone cannot reproduce the
+figures. The headline request count was re-checked against the local file on
+2026-11-04 (its line count still matches). The later production log of the same
+edge, with heavybag fields, is summarised separately in §8.
 
 > **Why this matters.** The heavybag's rule set is not guessed — it is *fitted to
 > this edge's actual attack surface*. This document records what the edge
@@ -251,7 +259,7 @@ shellshock `/bin/sh` traversal tail, and a `php://input` **args** signature
 `secrets.json`, `appsettings.json`, `*.env`, Docker `/containers/json`, Apache
 `/server-status`, Druid) that lifted the `uncatalogued` class 14.1% → 21.6%.
 **Action note:** the generic `.php` rule lands in the 404 bucket, and the
-lookup checks 404 before 403/444 (`heavybag_match.c` `scanner_lookup`), so ~46
+lookup checks 404 before 403/444 (`modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_scanner_lookup`), so ~46
 phpmyadmin/pma paths that end in `.php` now return **404 instead of 403** — they
 stay blocked, just blended into the backdrop 404s (the §2 "hide the fingerprint"
 goal). The phpmyadmin/pma *directory* probes keep their 403.
@@ -308,9 +316,10 @@ The procedure (reproducible, core-perl + nginx only — **no docker**):
    yields the authoritative `X-WAF-Reason`; a vector is frozen iff its reason
    != `none`. The *enforce* vhost then yields the real HTTP status. Frozen
    verdict = `{expected_reason: detect, expected_status: enforce}`. Outputs the
-   committed `regression-vectors.jsonl` (path/args, keyed by uri) and
-   `regression-headers.jsonl` (ua/referer/cookie/fakebot, keyed by value).
-2. **Assert** (`modules/ngx_http_heavybag/tests/run-regression-tests.sh`, modelled on `run-stat-tests.sh`):
+   committed `modules/ngx_http_heavybag/tests/corpus/regression-vectors.jsonl`
+   (path/args, keyed by uri) and `modules/ngx_http_heavybag/tests/corpus/regression-headers.jsonl`
+   (ua/referer/cookie/fakebot, keyed by value).
+2. **Assert** (`modules/ngx_http_heavybag/tests/run-regression-tests.sh`, modelled on `modules/ngx_http_heavybag/tests/run-stat-tests.sh`):
    an FP gate (benign baseline must not block) plus an enforce replay of the
    committed fixture, joining each result to its frozen verdict and asserting
    the `(reason,status)` tuple per vector. A 444 (`NGX_HTTP_CLOSE`, observed as
@@ -321,15 +330,22 @@ The harness uses a dedicated config (`modules/ngx_http_heavybag/tests/heavybag-r
 283xx) with detect+enforce vhost pairs and **exactly one matcher per vhost**
 (PREACCESS is first-match-wins, so dimensions stay isolated); no `proxy_pass`,
 no `waf_trusted_proxy`, no rate/geo — the only verdict is the matcher under
-test. `replay-client.pl` gained an `--enforce` mode (a fresh `Connection: close`
+test. `modules/ngx_http_heavybag/tests/replay-client.pl` gained an `--enforce` mode (a fresh `Connection: close`
 socket per request, so a byte-0 EOF is an unambiguous 444).
 
-Current frozen fixture: **40,614** path/args vectors + **160** header vectors
-(`expected_status` ∈ {404: 40,573, 403: 146, 444: 55}); the enforce replay runs
-in ~25 s and asserts 100% frozen-match. (Re-frozen 2026-06-15 across two §6 A
-gap-loop iterations — a fixture re-freeze is mandatory whenever a list edit
-intentionally changes coverage or an action bucket.) It complements the unit and
-integration suites registered in `cmake/Tests.cmake` with **live-fire** samples.
+<!-- BEGIN MEASURED: regression-fixture-census -->
+Current frozen fixture: **41360** path/args vectors + **312** header vectors (`expected_status` 404: 41471, 403: 146, 444: 55).
+<!-- END MEASURED: 4ef8148b12d9 -->
+
+The enforce replay asserts 100% frozen-match (it ran in ~25 s at the 2026-06
+freeze). The fixture was last re-frozen on 2026-11-04, after the 2026-11
+upstream list sync and live-log mining (c131f98): the re-freeze only added
+vectors (773 new, all in the 404 bucket) and flipped none of the existing ones
+(403/444 unchanged). The previous re-freeze was 2026-06-23 (after the 2026-06-15
+§6 A gap-loop iterations and the 2026-06-23 list edits). A fixture re-freeze is
+mandatory whenever a list edit intentionally changes coverage or an action
+bucket. It complements the unit and integration suites registered in
+`cmake/Tests.cmake` with **live-fire** samples.
 
 ### D — ASN / geo tuning from attacker IPs (DONE)
 
@@ -360,9 +376,9 @@ The procedure (reproducible, read-only on the log, libc + core-perl only —
    re-check `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_open`
    (a short-lived offline run just dies on SIGBUS) and the libloc signature
    verify `modules/ngx_http_heavybag/src/heavybag_geo.c:ngx_http_heavybag_geo_verify`
-   (offline, locally-trusted DB → no `-lcrypto`). Built manually like `loctest.c`/`locverify.c`, **not** in the
+   (offline, locally-trusted DB → no `-lcrypto`). Built manually like `reference/loctest.c` / `reference/locverify.c`, **not** in the
    module build: `cc -O2 -Wall -Wextra -o /tmp/geolookup reference/geolookup.c`.
-2. **Per-IP volume** (`extract-replay-vectors.pl --ip-volume`): one pass over the
+2. **Per-IP volume** (`modules/ngx_http_heavybag/tools/extract-replay-vectors.pl --ip-volume`): one pass over the
    corpus emits `replay-ip-volume.jsonl` — per source IP a `total` / `hostile` /
    `junk` triple + an attack-class histogram, reusing the same §3 label-first
    classification, baseline, and §4 malformed detection as the path extractor.
@@ -371,8 +387,8 @@ The procedure (reproducible, read-only on the log, libc + core-perl only —
    the internal `10.0.0.0/24` and the legit baseline are excluded from
    hostility ranking. Raw + hostile are shown side by side so a coarse lever's
    collateral on legitimate traffic stays visible (partner decision).
-3. **Join + rank** (`honeypot-d-report.pl`): pipes the distinct IPs through
-   `geolookup`, then aggregates hostile / total / junk + distinct-IP counts by
+3. **Join + rank** (`modules/ngx_http_heavybag/tools/honeypot-d-report.pl`): pipes the distinct IPs through
+   the `reference/geolookup.c` binary, then aggregates hostile / total / junk + distinct-IP counts by
    **/24** (v4) / **/64** (v6), **ASN**, **country**, and **network flag**,
    applies the thresholds below, and writes `honeypot-d-report.md` — evidence
    tables (prefix | total | hostile | junk | IPs | CC | ASN | flags) plus a
@@ -412,6 +428,14 @@ The levers, by surgical precision:
 > require no C re-freeze; the partner applies the reviewed candidates to the prod
 > conf out of band.
 
+> **Geo DB vintage.** `geodb/location.db` is a gitignored download
+> (`.gitignore`). It was refreshed from upstream on 2026-11-04 (upstream
+> Last-Modified 2026-10-28, 40,138,763 bytes). The previous copy, dated
+> 2026-06-12 and 63,517,012 bytes, is kept beside it as
+> `geodb/location.db.prev-20260612`. Any D report produced before 2026-11-04 was
+> resolved against that older copy, so re-run D before comparing CC/ASN tables
+> across the refresh.
+
 ---
 
 ## 7. Limitations & caveats
@@ -430,4 +454,48 @@ The levers, by surgical precision:
 - **Internal traffic** (`10.0.0.0/24`) must be excluded from any
   attacker-derived tuning, or it pollutes the geo/ASN and volume stats.
 - **Numbers age.** Traffic doubles yearly (§1.1); re-run the gap-analysis (A)
-  periodically — this document's figures are a 2026-06 snapshot.
+  periodically — the §1–§6 corpus figures are a 2026-06 snapshot.
+
+---
+
+## 8. Live production log, 2026-11 mining pass (edge `v`)
+
+**Provenance: researched 2026-11-04 by remote aggregation, not code-verified and
+not reproducible from this repo.** The log lives on the production host (ssh
+alias `v`) at `/opt/imaginarium/dataset/log/nginx/access.log` (~1 GB, ~4.0M
+lines). It holds two eras: ~1.65M old-format lines (2022-08 → 2026-06, the same
+period as the §1 corpus) and ~2.35M new-format lines (2026-06 → 2026-11-04)
+whose `log_format` adds heavybag's `waf=` / `type=` / `cc=` / `asn=` / `spoofed=`
+/ `ja4=` fields. The method: a perl aggregation ran on the remote host over ssh
+and only the aggregated TSV came back, so the raw log never left the edge. The
+working report was ephemeral (a `/tmp` scratch file) and is summarised here, not
+linked.
+
+Findings that change how the numbers in this page should be read:
+
+- **A 404 is a weak scanner signal on this edge.** The edge answers `/` itself
+  with 404, so a high per-client 404 rate does not, by itself, separate a scanner
+  from a visitor. Treat the §2 "404 bucket" as a backdrop, not a classifier.
+- **Impostor AI-bot fleets score `spoofed=0`.** The JA4 half of the spoof signal
+  compares the TLS family against the family implied by the UA's *browser*
+  token, `modules/ngx_http_heavybag/src/heavybag_ua_parse.c:ngx_http_heavybag_ua_expected_tls_family`.
+  The CIDR half fires only for a UA already classified `crawler` / `ai-crawler`
+  that has a `waf_verified_bot` range list configured, `modules/ngx_http_heavybag/src/heavybag_ua_parse.c:ngx_http_heavybag_ua_spoof_eval`.
+  The impostor fleets seen here (GrokBot, KimiBot, Qwen…, ~70 IPs per fleet,
+  100% 404) self-declare an AI-bot name rather than a browser, so the JA4 half
+  has no browser family to contradict. The CIDR half cannot fire without a
+  published-range list for the class, and these names were not in
+  `ai-crawler.list` before the 2026-11 sync. The same blind spot as §5.2, from
+  the other side.
+- **Blocks are rare in the new-format era.** 309 `scanner_*` blocks against
+  ~100k scanner-typed lines. The cause is not verified (mode, list coverage and
+  the 404-for-`/` backdrop are all candidates). Do not read it as a coverage
+  figure.
+
+The pass fed the `2026-11 live-log mining (edge v, 2026-06..11)` sections of
+`modules/ngx_http_heavybag/lists/ai-crawler.list`,
+`modules/ngx_http_heavybag/lists/crawler.list`,
+`modules/ngx_http_heavybag/lists/bot.list`,
+`modules/ngx_http_heavybag/lists/scanner-ua.list` and
+`modules/ngx_http_heavybag/lists/scanners.list`. The upstream half of the same
+refresh is catalogued in [[threat-intel-sources]] §7.

@@ -10,8 +10,8 @@ sources:
   - modules/ngx_http_heavybag/tests/run-replay-tests.sh
   - modules/ngx_http_heavybag/tests/heavybag-replay-test.conf
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: c131f98
+  date: 2026-11-04
 links:
   - threat-model
   - threat-intel-sources

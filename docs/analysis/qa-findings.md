@@ -15,8 +15,8 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_flag_add
   - modules/ngx_http_heavybag/src/heavybag_stream.c:ngx_stream_heavybag_handler
 verified:
-  commit: 2408c09
-  date: 2026-09-24
+  commit: c131f98
+  date: 2026-11-04
 links:
   - qa-subunit-inventory
   - qa-test-matrix

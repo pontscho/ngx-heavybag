@@ -16,9 +16,10 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_status.c
   - modules/ngx_http_heavybag/src/heavybag_stream.c
   - modules/ngx_http_heavybag/src/heavybag_authhttp.c
+  - modules/ngx_http_heavybag/tests/unit/test-authhttp.c
 verified:
-  commit: 2408c09
-  date: 2026-09-24
+  commit: c131f98
+  date: 2026-11-04
 links:
   - qa-findings
   - qa-test-matrix
@@ -57,7 +58,7 @@ links:
 
 **Headline gap:** 9 of 11 translation units have no unit tests — including the two highest-risk classes (geo memory-layout, shared-memory concurrency in rate/reputation/status).
 
-### Current unit-test coverage (re-checked at 2408c09)
+### Current unit-test coverage (re-checked at c131f98)
 
 The table above is the 2026-06-17 recon and stays as recorded. Since then the
 test-matrix round ([[qa-test-matrix]]) and the S9 fix series closed most of the
@@ -71,9 +72,10 @@ gap. Each of these TUs now has a unit suite that `#include`s the production
 - `heavybag_status.c` (the cc table, field-wise snapshot and render clamp, not the HTTP handler) — `modules/ngx_http_heavybag/tests/unit/test-stat-cc.c`.
 - `heavybag_ja4.c` — `modules/ngx_http_heavybag/tests/unit/test-ja4.c` and `modules/ngx_http_heavybag/tests/unit/test-ja4-extract.c`.
 - `heavybag_ua_parse.c` — `modules/ngx_http_heavybag/tests/unit/test_heavybag_ua_parse.c`.
+- `heavybag_authhttp.c` (only the constant-time secret compare, not the handler) — `modules/ngx_http_heavybag/tests/unit/test-authhttp.c`. Built with `-DHEAVYBAG_AUTHHTTP_UNIT_TEST`, which compiles just `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_secret_eq` behind a small type shim and guards the nginx-coupled remainder out (`modules/ngx_http_heavybag/tests/unit/run-unit-tests.sh`).
 
 Still **no unit suite** (covered only at the integration layer): `heavybag_spoof.c`,
-`heavybag_stream.c`, `heavybag_authhttp.c` (the mail trust model is netted by
+`heavybag_stream.c`, the rest of `heavybag_authhttp.c` (the mail trust model is netted by
 `modules/ngx_http_heavybag/tests/run-mailauth-fuzz.sh`), and
 `ngx_http_heavybag_module.c`.
 

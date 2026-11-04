@@ -7,9 +7,9 @@ description: Decision record for the lock-free statistics subsystem and the waf_
 sources:
   - modules/ngx_http_heavybag/src/heavybag_status.c
   - modules/ngx_http_heavybag/src/heavybag_status.h
-  - modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c
 verified:
-  commit: 7a935b0
+  commit: c131f98
+  date: 2026-11-04
   date: 2026-06-21
 links:
   - overview

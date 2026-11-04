@@ -8,9 +8,15 @@ sources:
   - modules/ngx_http_heavybag/lists/scanner-ua.list
   - modules/ngx_http_heavybag/lists/bot.list
   - modules/ngx_http_heavybag/lists/referer.list
+  - modules/ngx_http_heavybag/lists/ai-crawler.list
+  - modules/ngx_http_heavybag/lists/crawler.list
+  - modules/ngx_http_heavybag/lists/ja4.list
+  - modules/ngx_http_heavybag/lists/verified-crawler.list
+  - modules/ngx_http_heavybag/tools/regen-ja4-list.py
+  - modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_verified_bot_compile
 verified:
-  commit: 10bc7ea
-  date: 2026-09-24
+  commit: c131f98
+  date: 2026-11-04
 links:
   - threat-model
   - honeypot-B-plan
@@ -130,3 +136,95 @@ Two classes of source follow:
 - omrilotan/isbot: https://github.com/omrilotan/isbot
 - PayloadsAllTheThings (CRLF): https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/CRLF%20Injection
 - PortSwigger: https://portswigger.net/research/practical-web-cache-poisoning · https://portswigger.net/research/web-cache-entanglement · https://portswigger.net/web-security/host-header/exploiting
+
+---
+
+## 7. 2026-11-04 refresh (upstream sync + live-log mining)
+
+On 2026-11-04 the classifier lists were extended twice. A `2026-11 upstream
+sync` section, fed by the upstream facts below, landed in
+`modules/ngx_http_heavybag/lists/ai-crawler.list` (ai.robots.txt),
+`modules/ngx_http_heavybag/lists/crawler.list` (monperrus),
+`modules/ngx_http_heavybag/lists/scanner-ua.list` (OWASP CRS + device-detector
+Security Checker), `modules/ngx_http_heavybag/lists/scanners.list` (CRS
+restricted files, dev-tool dotfiles) and `modules/ngx_http_heavybag/lists/args.list`
+(WordPress REST batch probe). A `2026-11 live-log mining (edge v, 2026-06..11)`
+section, fed by the production-log pass in [[threat-model]] §8, landed in
+ai-crawler, crawler, bot, scanner-ua and scanners. `bot.list` received only the
+live-log section and `args.list` only the upstream one.
+
+Current entries per list (non-blank, non-comment lines):
+
+<!-- BEGIN MEASURED: heavybag-list-entry-counts -->
+| list | entries |
+|---|---:|
+| `ai-crawler.list` | 91 |
+| `crawler.list` | 33 |
+| `bot.list` | 43 |
+| `scanner-ua.list` | 73 |
+| `scanners.list` | 189 |
+| `args.list` | 7 |
+| `cookie.list` | 3 |
+| `referer.list` | 3 |
+| `ja4.list` | 982 |
+| `verified-crawler.list` | 3 |
+| `verified-crawler-local.list` | 2 |
+<!-- END MEASURED: 08bb2d9f22ec -->
+
+### 7.1 Upstream state, researched 2026-11-04
+
+**Researched on 2026-11-04, not code-verified.** The "previous" CRS and
+monperrus counts are the size of the raw pulls still committed as
+`modules/ngx_http_heavybag/tests/corpus/fixtures/raw/crs-scanners-user-agents.data`
+and `modules/ngx_http_heavybag/tests/corpus/fixtures/raw/crawler-user-agents.json`
+(checked against those files on 2026-11-04). Those raw pulls were **not**
+refreshed, so `modules/ngx_http_heavybag/tools/build-header-fixtures.pl` still
+builds the header fixtures from the older data.
+
+| Source | Previous sync → 2026-11-04 | Note |
+|---|---|---|
+| ai.robots.txt `robots.json` | 151 → 202 entries | feeds ai-crawler.list; generic tokens (Codex, Cursor, Dot, …) deliberately skipped, see the list's section comment |
+| monperrus/crawler-user-agents | 1498 → 1505 entries | feeds crawler.list |
+| OWASP CRS `rules/scanners-user-agents.data` | 241 → 248 lines | CRS **v4.30.0** (2026-10-02); feeds scanner-ua.list |
+| Niicolaa/ja4db-export | **frozen**: last data 2026-05-15 | its README (2026-08-04) says JA4DB is no longer open source |
+| FoxIO-LLC/ja4 `ja4plus-mapping.csv` | unchanged since 2025-09 | |
+
+**`ja4.list` is not refreshable from its documented sources.** Its generator,
+`modules/ngx_http_heavybag/tools/regen-ja4-list.py`, ingests the Niicolaa export
+plus the FoxIO mapping. The export is frozen and the mapping has not moved, so a
+re-run reproduces the existing table at best. A new JA4 source is an open data
+gap (§4). The generator's docstring and the `ja4.list` header still describe
+the export as "a daily mirror".
+
+### 7.2 Verified-crawler IP-range endpoints (fake-bot CIDR half)
+
+The fake-bot check matches a `crawler` / `ai-crawler` request's client IP
+against a CIDR list loaded by `waf_verified_bot`
+(`modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_verified_bot_compile`).
+The module never parses JSON; the list is produced offline from the operators'
+published JSON ranges. **No in-repo fetcher exists**: `README.md` and the
+`modules/ngx_http_heavybag/lists/verified-crawler.list` header describe an
+offline cron job, but no script under `modules/ngx_http_heavybag/tools/`
+implements it. Both still name Google's `googlebot.json`.
+
+Endpoints confirmed live on 2026-11-04 (researched, not code-verified):
+
+| Operator | Endpoint(s) | Note |
+|---|---|---|
+| Google | https://developers.google.com/static/crawling/ipranges/common-crawlers.json, plus `special-crawlers.json` and `user-triggered-fetchers.json` under the same path | the ranges moved on 2026-03-31; `googlebot.json` was renamed to `common-crawlers.json` |
+| OpenAI | https://openai.com/gptbot.json, https://openai.com/searchbot.json, https://openai.com/chatgpt-user.json | |
+| Perplexity | https://www.perplexity.ai/perplexitybot.json, https://www.perplexity.ai/perplexity-user.json | |
+| Apple | https://search.developer.apple.com/applebot.json | |
+| Anthropic | https://claude.com/crawling/bots.json | one shared file for all Anthropic bots |
+| Microsoft (Bing) | https://www.bing.com/toolbox/bingbot.json | |
+| DuckDuckGo | https://duckduckgo.com/duckduckbot.json | |
+| Mistral | `mistral.ai/mistralai-user-ips.json` | |
+
+### 7.3 Geo DB
+
+`geodb/location.db` (gitignored, downloaded) was refreshed from upstream on
+2026-11-04: upstream Last-Modified 2026-10-28, 40,138,763 bytes. The previous
+copy (2026-06-12, 63,517,012 bytes) is kept as `geodb/location.db.prev-20260612`.
+The geo-dependent integration suites validate their ground truth against the DB
+at run time and SKIP when it has drifted from the baked conf, so re-run them
+after the swap (see [[qa-test-matrix]]).

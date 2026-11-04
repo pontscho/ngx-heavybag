@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "measurements": {
+    "heavybag-list-entry-counts": {
+      "description": "Entries per shipped classifier list under modules/ngx_http_heavybag/lists/: every line that is neither blank nor a '#' comment (one pattern, token or CIDR per line; a trailing action token does not add an entry). Rendered as a markdown table.",
+      "command": [
+        "perl",
+        "-e",
+        "print qq{| list | entries |\n|---|---:|\n}; for my $f (@ARGV) { open(my $h, q{<}, $f) or die qq{$f: $!\n}; my $n = 0; while (<$h>) { $n++ unless /^\\s*(?:#|\\z)/ } close $h; (my $b = $f) =~ s{.*/}{}; print qq{| `$b` | $n |\n} }",
+        "modules/ngx_http_heavybag/lists/ai-crawler.list",
+        "modules/ngx_http_heavybag/lists/crawler.list",
+        "modules/ngx_http_heavybag/lists/bot.list",
+        "modules/ngx_http_heavybag/lists/scanner-ua.list",
+        "modules/ngx_http_heavybag/lists/scanners.list",
+        "modules/ngx_http_heavybag/lists/args.list",
+        "modules/ngx_http_heavybag/lists/cookie.list",
+        "modules/ngx_http_heavybag/lists/referer.list",
+        "modules/ngx_http_heavybag/lists/ja4.list",
+        "modules/ngx_http_heavybag/lists/verified-crawler.list",
+        "modules/ngx_http_heavybag/lists/verified-crawler-local.list"
+      ]
+    },
+    "regression-fixture-census": {
+      "description": "Size of the committed C regression fixture: path/args vectors (regression-vectors.jsonl lines), header vectors (regression-headers.jsonl lines), and the frozen expected_status distribution across both files.",
+      "command": [
+        "perl",
+        "-ne",
+        "$n{$ARGV =~ /headers/ ? q{h} : q{v}}++; $s{$1}++ if /\"expected_status\":(\\d+)/; END { printf qq{Current frozen fixture: **%d** path/args vectors + **%d** header vectors (`expected_status` 404: %d, 403: %d, 444: %d).\n}, $n{v}, $n{h}, $s{404}, $s{403}, $s{444} }",
+        "modules/ngx_http_heavybag/tests/corpus/regression-vectors.jsonl",
+        "modules/ngx_http_heavybag/tests/corpus/regression-headers.jsonl"
+      ]
+    }
+  }
+}
