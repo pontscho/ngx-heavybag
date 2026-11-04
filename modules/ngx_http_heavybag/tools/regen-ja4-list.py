@@ -10,7 +10,11 @@ one-time OFFLINE step (no build-time network); the result, ja4.list, is what
 the module loads.
 
 Data sources (both reachable on raw.githubusercontent.com):
-  1. Niicolaa/ja4db-export -- a daily mirror of the full ja4db.com dataset:
+  1. Niicolaa/ja4db-export -- a mirror of the ja4db.com dataset. NOTE: this
+     mirror has been FROZEN since 2026-05-15 (no longer "daily"): JA4DB is no
+     longer open source, so no fresher public export exists. Re-running the
+     procedure below therefore reproduces the same data unless a new source
+     appears:
        https://raw.githubusercontent.com/Niicolaa/ja4db-export/main/csv/ja4_fingerprint.csv
   2. FoxIO-LLC/ja4 -- the official curated reference mapping (client `ja4` col):
        https://raw.githubusercontent.com/FoxIO-LLC/ja4/main/ja4plus-mapping.csv
@@ -133,9 +137,11 @@ HEADER = """\
 #
 # ---------------------------------------------------------------------------
 # GENERATED -- do not hand-edit. Built by tools/regen-ja4-list.py from ja4db
-# CSV exports (Niicolaa/ja4db-export, a daily mirror of ja4db.com, + the
-# official FoxIO-LLC/ja4 ja4plus-mapping.csv -- ja4db.com itself is unreachable
-# from the build host). See that script's header for the refresh procedure.
+# CSV exports (Niicolaa/ja4db-export, a mirror of ja4db.com that is FROZEN since
+# 2026-05-15 -- JA4DB is no longer open source, so no fresher public export
+# exists -- + the official FoxIO-LLC/ja4 ja4plus-mapping.csv; ja4db.com itself
+# is unreachable from the build host). See that script's header for the
+# refresh procedure.
 # Family mapping: the curated application/library label when present, else the
 # observed user_agent_string (engine family only) -> tool/bot/chromium/firefox/
 # safari. The UA fallback is what gives broad coverage; the curated label is

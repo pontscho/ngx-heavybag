@@ -7,13 +7,13 @@
 #   INPUTS:
 #     - corpus feeds  (extract-replay-vectors.pl --ua-vectors/--referer-vectors):
 #         replay-ua-vectors.jsonl, replay-referer-vectors.jsonl   [carry volume]
-#     - external lists pulled to fixtures/raw/ (gitignored):
+#     - external lists pulled to fixtures/raw/ (TRACKED in git):
 #         crs-scanners-user-agents.data, seclists-useragents.fuzz.txt,
 #         bad-referrers.list, crawler-user-agents.json, fuzzdb-*.txt
 #     - heavybag's own classifier lists (lists/crawler.list, lists/ai-crawler.list)
 #         -> the fake-bot fixture stays in sync with what the module classifies.
 #
-#   OUTPUT (fixtures/, gitignored derivatives):
+#   OUTPUT (fixtures/, tracked derivatives -- committed alongside the script):
 #     ua.jsonl  referer.jsonl  cookie.jsonl  fakebot.jsonl
 #       each line: {"value":"<header value>","count":N,"src":"<provenance>"}
 #       count = corpus volume for corpus-derived rows, 1 for external rows
@@ -29,7 +29,7 @@
 #
 #   core-perl only (JSON::PP ships with perl >= 5.14); NO CPAN, NO docker.
 #   This script is the durable, committable step-2 deliverable; its OUTPUTS are
-#   gitignored corpus derivatives.
+#   tracked corpus derivatives (fixtures/*.jsonl and fixtures/raw/ are in git).
 #
 use strict;
 use warnings;

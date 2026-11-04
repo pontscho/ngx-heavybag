@@ -435,7 +435,7 @@ published range.
 
 The check is **fully stateless**: no reverse/forward DNS, no per-IP cache, no
 request-path I/O. The published ranges are downloaded **offline** (a cron job
-converts e.g. Google's `googlebot.json` into a plain CIDR list) and loaded once
+converts e.g. Google's `common-crawlers.json` (renamed upstream from `googlebot.json` on 2026-03-31: `https://developers.google.com/static/crawling/ipranges/common-crawlers.json`) into a plain CIDR list) and loaded once
 at config time, then matched with nginx's built-in `ngx_cidr_match`. It runs
 *after* the `waf_bot_block` UA gate and *before* the scanner-path scan.
 
