@@ -17,16 +17,16 @@
 # var is explicitly overridden with -DPKG_*_VERSION=… (which lands in the cache,
 # is DEFINED, and therefore sticks until the cache is cleared).
 if(NOT DEFINED PKG_OPENSSL_VERSION)
-  set(PKG_OPENSSL_VERSION 3.5.7)
+  set(PKG_OPENSSL_VERSION 3.5.9)
 endif()
 if(NOT DEFINED PKG_NGINX_VERSION)
-  set(PKG_NGINX_VERSION 1.31.3)
+  set(PKG_NGINX_VERSION 1.31.8)
 endif()
 if(NOT DEFINED PKG_ZLIBNG_VERSION)
   set(PKG_ZLIBNG_VERSION 2.3.3)
 endif()
 if(NOT DEFINED PKG_PCRE2_VERSION)
-  set(PKG_PCRE2_VERSION 10.47)
+  set(PKG_PCRE2_VERSION 10.49)
 endif()
 
 # --- download URLs ---------------------------------------------------------
