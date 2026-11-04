@@ -14,9 +14,10 @@ sources:
   - modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_set_mail_auth
   - modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_set_mail_backend
   - modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_set_mail_secret
+  - modules/ngx_http_heavybag/tests/unit/test-authhttp.c
 verified:
-  commit: 10bc7ea
-  date: 2026-09-24
+  commit: c131f98
+  date: 2026-11-04
 links:
   - overview
   - qa-findings
@@ -79,6 +80,10 @@ connect and forge `Client-IP`. The forwarded address is honoured only when
    equal-length pair into one accumulator, so its timing depends only on the
    length. A length mismatch short-circuits, and an empty secret never matches
    `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_secret_eq`.
+   This compare is the one piece of the head with its own unit suite,
+   `modules/ngx_http_heavybag/tests/unit/test-authhttp.c`: the file builds it
+   alone under `HEAVYBAG_AUTHHTTP_UNIT_TEST`, with the nginx-coupled remainder
+   guarded out (`modules/ngx_http_heavybag/tests/unit/run-unit-tests.sh`).
 
 Every other case is **fail-closed**: `Client-IP` is ignored and the real
 connection peer is judged. That covers no secret configured, a missing or

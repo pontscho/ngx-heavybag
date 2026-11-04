@@ -10,8 +10,8 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_ja4.c
   - modules/ngx_http_heavybag/lists/ja4.list
 verified:
-  commit: 7a935b0
-  date: 2026-06-21
+  commit: c131f98
+  date: 2026-11-04
 links:
   - overview
 ---
@@ -487,7 +487,7 @@ A new `heavybag_ua_parse.c` implementing an ordered substring chain (1:1 with th
 - New variables simply do not appear unless referenced — no config break for existing deployments.
 
 ### New Dependencies
-None. No new libraries. ja4db data is committed, not fetched.
+None. No new libraries. Only the generated `lists/ja4.list` is committed; the ja4db source data is fetched by hand at regeneration time (`modules/ngx_http_heavybag/tools/regen-ja4-list.py` documents the `curl` refresh steps) and is not kept in the repo. The build itself never fetches anything.
 
 ### Configuration Changes
 - New directive `waf_ja4_list <path>;` (loc/srv level, same scope as the other list directives) to load `lists/ja4.list`.

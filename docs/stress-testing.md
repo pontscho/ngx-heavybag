@@ -10,8 +10,8 @@ sources:
   - modules/ngx_http_heavybag/tests/stress/heavybag-stress-test.conf
   - modules/ngx_http_heavybag/tools/gen-stress-corpus.pl
 verified:
-  commit: 2408c09
-  date: 2026-09-24
+  commit: c131f98
+  date: 2026-11-04
 links:
   - stress-campaign
   - overview
@@ -217,7 +217,9 @@ The mail probes authenticate with `X-WAF-Key` against the stress conf's
 authenticated caller (`modules/ngx_http_heavybag/tests/stress/heavybag-stress-test.conf`,
 `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_caller_trusted`);
 without the key every probe would be judged on the loopback peer and the
-allow/deny mix would collapse.
+allow/deny mix would collapse. The committed conf carries only the
+`__HB_SECRET__` placeholder; the runner renders it, and sends the same value as
+`X-WAF-Key`, from one `SECRET` variable (`modules/ngx_http_heavybag/tests/run-stress-tests.sh`).
 
 Any mismatch is a real bug (a lost counter or a lock-free race), and the harness
 exits 1. The `would_block[*]` overlay, the `http_resp_*` / `http_scanner_path_*`

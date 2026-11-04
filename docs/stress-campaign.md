@@ -11,8 +11,8 @@ sources:
   - modules/ngx_http_heavybag/tests/live/live-slo-path.sh
   - modules/ngx_http_heavybag/tests/live/live-slo-local.sh
 verified:
-  commit: 2408c09
-  date: 2026-09-24
+  commit: c131f98
+  date: 2026-11-04
 links:
   - stress-testing
   - overview

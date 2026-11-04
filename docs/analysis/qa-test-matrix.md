@@ -22,8 +22,8 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_status.c:ngx_http_heavybag_stat_cc_bump
   - cmake/Tests.cmake
 verified:
-  commit: 2408c09
-  date: 2026-09-24
+  commit: c131f98
+  date: 2026-11-04
 links:
   - qa-findings
   - qa-subunit-inventory
@@ -409,7 +409,7 @@ The campaign critic flagged four surfaces it had not fuzzed to the depth of the 
 
 Closes the critic's second un-probed surface. `ngx_http_heavybag_reputation_check()` (`heavybag_reputation.c`) is a strict **first-match-wins, early-return** pipeline; every prior reputation test was single-source (one IP matching exactly one of blocklist / geo / ASN / flag). This round builds **collisions** — one IP matching MULTIPLE sources at once — and asserts the documented order. Crucially, every collision is backed by single-source **controls** proving the lower-priority source fires alone for that IP, so a collision result genuinely proves ordering (not a silently-non-matching source).
 
-**Surface:** the shared verdict pipeline (`heavybag_reputation.c:50/61/98/109/126/148/170/182`). New harness `tests/run-reputation-precedence.sh` + `tests/heavybag-repprec-test.conf` (one vhost, port 28701, 16 `location =` probes), registered as CTest `heavybag_repprec`. Driven over the HTTP PREACCESS path (`waf_trusted_proxy 127.0.0.1` + spoofed `X-Forwarded-For` inject the client IP; `waf_reason_header on` exposes `ctx->reason` as `X-WAF-Reason`). reputation_check is shared verbatim by the mail + stream heads, so HTTP coverage is authoritative. Each location is backed by a real `$document_root/p-<name>` file (runner-created) so an ALLOWED request is served in place — no `try_files` internal redirect that would clear `ctx->reason` (the [[nginx-ctx-cleared-on-internal-redirect]] landmine), making `X-WAF-Reason` readable for allowed verdicts too. **19/19 PASS.** Geo-centric: SKIPs (exit 2 -> CTest SKIPPED) if geodb/oracle is absent or its ground truth has drifted from the baked conf.
+**Surface:** the shared verdict pipeline (`heavybag_reputation.c:50/61/98/109/126/148/170/182`). New harness `tests/run-reputation-precedence.sh` + `tests/heavybag-repprec-test.conf` (one vhost, port 28701, 16 `location =` probes), registered as CTest `heavybag_repprec`. Driven over the HTTP PREACCESS path (`waf_trusted_proxy 127.0.0.1` + spoofed `X-Forwarded-For` inject the client IP; `waf_reason_header on` exposes `ctx->reason` as `X-WAF-Reason`). reputation_check is shared verbatim by the mail + stream heads, so HTTP coverage is authoritative. Each location is backed by a real `$document_root/p-<name>` file (runner-created) so an ALLOWED request is served in place — no `try_files` internal redirect that would clear `ctx->reason` (the "nginx clears `r->ctx` on internal redirect" landmine, [[qa-subunit-inventory]] § Known landmines), making `X-WAF-Reason` readable for allowed verdicts too. **19/19 PASS.** Geo-centric: SKIPs (exit 2 -> CTest SKIPPED) if geodb/oracle is absent or its ground truth has drifted from the baked conf.
 
 Ground-truth IPs (oracle-validated at runtime): `185.177.72.1` FR/AS211590/0x0000 (geo+asn, no flag bit); `8.8.8.8` US/AS15169/0x0004 anycast (flag+asn+geo); `185.220.101.1` DE/AS60729/0x0001 anonymous-proxy (flag+asn+geo).
 
