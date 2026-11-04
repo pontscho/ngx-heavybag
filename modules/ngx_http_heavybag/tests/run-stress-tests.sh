@@ -90,7 +90,9 @@ fi
 RENDER_DIR=$CORPUS/.render
 mkdir -p "$RENDER_DIR" "$ARTI"
 CONF=$RENDER_DIR/heavybag-stress-test.conf
+SECRET='hbtest-mail-secret'   # waf_mail_trusted_secret (__HB_SECRET__) + X-WAF-Key
 sed -e "s#@HB_ROOT@#$ROOT#g" \
+    -e "s#__HB_SECRET__#$SECRET#g" \
     -e "s/^worker_processes  2;/worker_processes  $HB_WORKERS;/" \
     "$SRC_CONF" > "$CONF"
 
@@ -325,7 +327,7 @@ run_s2() {
 # caller so the injected Client-IP is honoured (SV11 shared-secret trust model).
 hb_mail_verdict() {
     local ip="$1"
-    curl -s -D - -o /dev/null -H 'X-WAF-Key: hbtest-mail-secret' \
+    curl -s -D - -o /dev/null -H "X-WAF-Key: $SECRET" \
         -H "Client-IP: $ip" "http://127.0.0.1:$P_MAIL/waf-mail-auth" \
         | awk 'tolower($1)=="auth-status:"{ $1=""; sub(/^ /,""); print; exit }'
 }

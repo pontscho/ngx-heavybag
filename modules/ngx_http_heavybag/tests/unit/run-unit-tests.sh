@@ -140,6 +140,15 @@ else
     echo "reputation unit test COMPILE FAILED"; rc=1
 fi
 
+# ---- mail auth_http constant-time secret compare (pure core, 3-type shim) --
+BIN_AUTHHTTP="$TMP/heavybag-test-authhttp"
+if "$CC" -DHEAVYBAG_AUTHHTTP_UNIT_TEST $COMMON $COV "$DIR/test-authhttp.c" -o "$BIN_AUTHHTTP"; then
+    echo "== mail auth_http secret_eq core =="
+    "$BIN_AUTHHTTP" "$@" || rc=1
+else
+    echo "authhttp unit test COMPILE FAILED"; rc=1
+fi
+
 # ---- scanner/match PCRE1 #else-arm coverage (real pcre2 engine underneath) -
 # Drives the legacy PCRE1 code path of ngx_http_heavybag_regex_exec -- dead in
 # the normal match build, which hard-defines NGX_PCRE2. -DHEAVYBAG_MATCH_FORCE_
@@ -280,6 +289,7 @@ if [ "${HEAVYBAG_COVERAGE:-0}" = "1" ]; then
     cov_union heavybag_match      heavybag-test-match-test-match heavybag-test-match-pcre1-test-match-pcre1
     cov_union heavybag_status     heavybag-test-stat-cc-test-stat-cc
     cov_union heavybag_reputation heavybag-test-reputation-test-reputation
+    cov_union heavybag_authhttp   heavybag-test-authhttp-test-authhttp
 
     if [ "$cov_fail" = 0 ]; then
         echo "  -> all production sources: 100.00% line + 100.00% branch (reachable code; exclusions auditable in-diff)"
