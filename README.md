@@ -993,6 +993,13 @@ The `asn` and `method` reasons render automatically in every per-reason loop
 `--with-http_stub_status_module`, the core connection table
 (`active`/`reading`/`writing`/`accepted`/…) is re-exported too.
 
+The per-flag breakdown (`heavybag_http_blocked_flag_total{flag=…}`, plain
+`http_flag_*`, json `flags`) counts per matched flag **bit**, not per request:
+a request matching two bits bumps two slots, and a flag verdict that carries no
+bit (the `unknown` deny of `waf_flag_block`, or a `flag_cc` code such as Tor's
+`T1`) bumps none, so the per-flag sum is not reconcilable with
+`heavybag_http_blocked_total{reason="flag"}`.
+
 **Metric names differ by format.** The `plain` output uses flat keys
 (`http_requests`, `http_resp_429`, `http_blocked_blocklist`, …); `prometheus`
 uses labelled metric families (`heavybag_http_requests_total`,
