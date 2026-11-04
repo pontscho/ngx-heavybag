@@ -18,3 +18,7 @@ javascript:          444
 
 # ---- PHP RCE ---------------------------------------------------------------
 php://input          444
+
+# ---- WordPress REST batch probe (2026-11 upstream sync) -------------------
+# /?rest_route=/batch/v1 -- query-string form of /wp-json/batch/v1
+(^|&)rest_route=/batch/v1

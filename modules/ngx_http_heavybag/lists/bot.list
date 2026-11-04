@@ -52,3 +52,12 @@ GuzzleHttp
 node-fetch
 undici
 reqwest
+
+# -- 2026-11 live-log mining (edge v, 2026-06..11) --------------------------
+# SEO / domain-intel / monitoring bots.
+Infrawatch
+serpstatbot
+FlowIQ
+radar-monitor
+getdomaindata
+wpbot/

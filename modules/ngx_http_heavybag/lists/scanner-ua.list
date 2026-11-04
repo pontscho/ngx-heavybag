@@ -66,3 +66,54 @@ python-requests
 aiohttp
 # curl / libcurl (also matches grpcurl, harmless)
 curl
+
+# -- 2026-11 upstream sync (OWASP CRS + device-detector Security Checker) ----
+# Already covered by existing tokens: FreePBX-Scanner, Shodan (Shodan-Pull).
+# Not added: bare 'vega' (not present), SecurityScanner (too generic).
+php2shell
+# Forged UA prefix used by exploit kits; anchored to the start of the UA
+^Mozilla/6\.0
+CheckerProxy
+CMSLookup
+CSE-Scanner
+DomainProbe
+Goosee-Audit
+NetScope-DomainScanner
+TLM-Audit-Scanner
+wp2shell-check
+ProxyChecker
+RootEvidence
+InfoGuardDisclosureResearch
+recon-(crawler|engine)
+
+# -- 2026-11 live-log mining (edge v, 2026-06..11) --------------------------
+# Self-identifying scanners / probe tools seen as type=regular with 50-100% 404.
+# Skipped on purpose: ForestEngine (also appended to forged Chrome UAs, ambiguous),
+# fasthttp / Custom-AsyncHttpClient / WordPress/6.4.3 (too generic), and
+# Let's Encrypt validation server (legitimate ACME validation).
+# LeakIX l9scan (l9explore / l9tcpid are listed above)
+l9scan
+odin-scanner
+WP-Safe-Scanner
+CMS-Checker
+CMS-Security-Auditor
+vuln_scanner
+symfony-scanner
+Go Web Pentest Tool
+research-scan
+pathscan
+V3-Hunt
+ExposureWatch
+# Ruhr-University Bochum softsec measurement scanners
+Software Security Research
+# CVE-named probe UAs (cve-2026-87902-poc, metabase-cve-2026-72898-detect)
+cve-[0-9]+-[0-9]+.*(poc|detect)
+# UA field carrying the WordPress installer URL probe
+wp-admin/install\.php
+bitdiscovery
+HTTP Banner Detection
+CyberConvoyScout
+WebSiphon
+rawgrab
+# typo'd forged Mozilla prefix
+^Mozlila

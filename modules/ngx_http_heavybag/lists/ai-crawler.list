@@ -54,3 +54,55 @@ ApifyBot
 ExaBot
 PhindBot
 kagi-fetcher
+
+# -- 2026-11 upstream sync (ai.robots.txt, researched 2026-11-04) -----------
+# Diffbot-User is already covered by 'Diffbot'; generic tokens (Codex, Cursor,
+# Dot, Muse, Instinct, bare nbot) are deliberately NOT listed (false positives).
+AgentDataBot
+AGI Agent
+AIWebIndex
+amazon-QBusiness
+BixelBot
+CartAI Agentic Commerce
+CledaraBot
+CloudflareBrowserRenderingCrawler
+CragCrawler
+DoubaoBot
+ElevenlabsBot
+ElevenlabsCrawler
+ERNIEBot
+ExaSearchBot
+ExaUser
+GeistHaus-PageFetcher
+GoogleAgent-URLContext
+Grok Bot
+GrokAppAndroid
+GrokBot
+HarkBot
+Hunyuan
+KeenableBot
+Kimi-Agent
+Kimi-SearchBot
+Kimi-User
+KimiBot
+MistralAI-Index
+MistralAI-Training
+MoonshotBot
+Mozilla-Tabstack
+OAI-AdsBot
+Payhawk Invoice Fetching Agent
+qodercli
+Querit-SearchBot
+QueritBot
+QwenBot
+Reflectionbot
+ScryBot
+TongyiBot
+UseAI
+xAI-Grok
+YiBot
+YiyanBot
+
+# -- 2026-11 live-log mining (edge v, 2026-06..11) --------------------------
+ChatGLM-Spider
+xAI-SearchBot

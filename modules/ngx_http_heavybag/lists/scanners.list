@@ -152,6 +152,81 @@ phpunit/.{0,40}eval-stdin\.php
 ^/nginx_status$
 ^/druid/
 
+# ---- 2026-11 upstream sync (CRS restricted files, dev-tool dotfiles) --------
+# Matching is against r->uri (path only): the query-string form
+# /?rest_route=/batch/v1 cannot be expressed here (it is in args.list).
+# Already covered, not re-added: /wp-json/batch/v1 and
+# /wp-content/plugins/kapibala_plugin/ (^/wp-), dbconn.php (.php catch-all),
+# bitbucket-pipelines.yml / kustomization.yml / Chart.yaml (.ya?ml rule).
+(^|/)\.claude(/|$)
+(^|/)\.pypirc$
+(^|/)\.pnpmrc$
+(^|/)\.pnpm-store/
+(^|/)\.oscrc$
+(^|/)\.osc_cookiejar$
+(^|/)\.erlang\.cookie$
+(^|/)WS_FTP\.log$
+(^|/)remix\.config\.js$
+(^|/)netlify\.toml$
+(^|/)vercel\.json$
+
+# ---- 2026-11 live-log mining (edge v, 2026-06..11) --------------------------
+# Probe families seen from 20-200+ IPs each with 0% 200-rate on the live edge
+# (/tmp/logmine/report.md s2). The edge legitimately serves /app.css, /app.json,
+# /app-*.js, /hmr-runtime.js, /api/{health,users,session,login}, /safranek/*,
+# /parastable*, /sdcpp/*, /static/renderpark.*, /fonts/*: NONE of the patterns
+# below match those (checked with a PCRE sanity run), so bare /app.js,
+# /index.js, /app.json and generic app routes (/admin, /graphql, /mcp, ...) are
+# deliberately NOT listed. Already covered, not re-added: xmlrpc.php (.php
+# catch-all), wlwmanifest, /etc/passwd, /.env* variants (incl. %2eenv, which
+# nginx decodes), .claude, *.ya?ml, *.properties, .npmrc. Plain `..` segments never reach r->uri (nginx merges them); only the
+# double-encoded `..%2f` residue is matchable.
+# cloud / CLI credential stores
+(^|/)(\.boto|\.s3cfg|\.amplifyrc|credentials\.ini|aws-exports\.js)$
+(^|/)\.config/gcloud/
+(^|/)application_default_credentials\.json$
+# GCP / Firebase service-account key family
+(^|/)(service[-_]?account|google-(service-account|credentials|services)|gcp-(key|credentials|service)|gc-service|serviceAccountKey|firebase[-_a-z0-9]*|sa|key|push_config)\.json$
+# container / PaaS / IaC config
+(^|/)Dockerfile$
+(^|/)Dockerrun\.aws\.json$
+(^|/)vendor/composer/installed\.json$
+(^|/)railway\.json$
+^/.*\.toml$
+(^|/)supabase/config\.toml$
+# client-config JS leaks (exact file names only)
+(^|/)(config|env|env-config|runtime-config|app\.config|firebaseConfig|firebase-config|credentials)\.js$
+# WordPress under arbitrary prefixes (/blog/wp-json/..., /wp/wp-includes/...)
+(^|/)wp-(json|admin|includes|content)/
+# Spring actuator under a prefix (/api/actuator/env)
+(^|/)actuator(/|$)
+# Vite dev-server LFI / RSC probes
+^/@fs/
+^/__vite
+# LFI / traversal residue (proc, k8s secrets, double-encoded ..%2f)
+(^|/)proc/self/
+(^|/)var/run/secrets/
+\.\.%(25)?(2f|5c)
+# private keys / TLS material
+^/.*\.(key|pem)$
+(^|/)id_(rsa|dsa|ecdsa|ed25519)
+(^|/)private[-_]?key
+# shell / tool dotfiles
+(^|/)\.(bashrc|zshrc|bash_profile|profile|dockercfg|htaccess|firebaserc)$
+(^|/)\.dev\.vars
+(^|/)\.terraform
+(^|/)\.idea/
+(^|/)rclone\.conf$
+# AI-tool config / secret stores
+(^|/)\.(anthropic|cursor|openai|aider)(/|$|\.)
+# Astro source-map probes
+\.astro\.mjs\.map$
+# admin-API / file-read probes
+^/api/(console/api_server|fs/read|system/fileView)
+# API docs not served at this edge
+(^|/)openapi\.json$
+(^|/)swagger([-_.]|/|$)
+
 # ---- generic admin / installer probes -------------------------------------
 ^/administrator
 ^/ReportServer

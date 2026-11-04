@@ -30,3 +30,24 @@ Google-InspectionTool
 AdsBot-Google
 Storebot-Google
 SemanticScholarBot
+
+# -- 2026-11 upstream sync (monperrus/crawler-user-agents) ------------------
+# AIWebIndex lives in ai-crawler.list (checked first); not duplicated here.
+9bot/
+GeedoShopProductFinder
+InfoSifter
+IsonAI-User
+IsonSearchBot
+ListGemBot
+WatchForBot
+
+# -- 2026-11 live-log mining (edge v, 2026-06..11) --------------------------
+# Self-identifying indexers / survey crawlers (bot.list holds monitor/SEO tools).
+Meta-WebIndexer
+NetcraftSurveyAgent
+tranco-crawler
+Pandalytics
+GenomeCrawlerd
+ApcosysBot
+FossickBot
+QlyzeBot

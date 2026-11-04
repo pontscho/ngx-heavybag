@@ -12,7 +12,7 @@
 # map to UNKNOWN -> never produce a spoof signal.
 #
 # ---------------------------------------------------------------------------
-# GENERATED -- do not hand-edit. Built by lists/regen-ja4-list.py from ja4db
+# GENERATED -- do not hand-edit. Built by tools/regen-ja4-list.py from ja4db
 # CSV exports (Niicolaa/ja4db-export, a daily mirror of ja4db.com, + the
 # official FoxIO-LLC/ja4 ja4plus-mapping.csv -- ja4db.com itself is unreachable
 # from the build host). See that script's header for the refresh procedure.
