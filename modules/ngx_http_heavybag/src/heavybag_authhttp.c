@@ -38,19 +38,35 @@
  * counts these requests a second time.
  */
 
+#ifdef HEAVYBAG_AUTHHTTP_UNIT_TEST
+/* Standalone unit build (tests/unit/test-authhttp.c): only the pure
+ * secret_eq core is compiled; this shim stands in for the nginx types it uses. */
+#include <stddef.h>
+#include <stdint.h>
+typedef unsigned char  u_char;
+typedef uintptr_t      ngx_uint_t;
+typedef struct {
+    size_t   len;
+    u_char  *data;
+} ngx_str_t;
+#else
 #include "ngx_http_heavybag.h"
 #include "heavybag_authhttp.h"
 #include "heavybag_reputation.h"
 #include "heavybag_status.h"
 #include "heavybag_rate.h"
+#endif
 
 
+#ifndef HEAVYBAG_AUTHHTTP_UNIT_TEST
 static ngx_table_elt_t *ngx_http_heavybag_add_header(ngx_http_request_t *r,
     const char *key, size_t klen, u_char *val, size_t vlen);
 static ngx_str_t *ngx_http_heavybag_authhttp_header(ngx_http_request_t *r,
     const char *name, size_t nlen);
+#endif
 static ngx_uint_t ngx_http_heavybag_authhttp_secret_eq(ngx_str_t *a,
     ngx_str_t *b);
+#ifndef HEAVYBAG_AUTHHTTP_UNIT_TEST
 static ngx_uint_t ngx_http_heavybag_authhttp_peer_trusted(ngx_connection_t *c);
 static ngx_uint_t ngx_http_heavybag_authhttp_caller_trusted(
     ngx_http_request_t *r, ngx_http_heavybag_loc_conf_t *wlcf);
@@ -242,6 +258,8 @@ allowed:
     return ngx_http_heavybag_authhttp_allow(r, wlcf);
 }
 
+#endif /* !HEAVYBAG_AUTHHTTP_UNIT_TEST */
+
 
 /*
  * Constant-time equality of two byte strings.
@@ -277,6 +295,7 @@ ngx_http_heavybag_authhttp_secret_eq(ngx_str_t *a, ngx_str_t *b)
     return (diff == 0) ? 1 : 0;
 }
 
+#ifndef HEAVYBAG_AUTHHTTP_UNIT_TEST  /* nginx-coupled remainder: out of the secret_eq unit TU */
 
 /*
  * Is the CALLER authenticated to dictate the address we judge (Client-IP)?
@@ -532,3 +551,5 @@ ngx_http_heavybag_authhttp_header(ngx_http_request_t *r, const char *name,
 
     return NULL;
 }
+
+#endif /* !HEAVYBAG_AUTHHTTP_UNIT_TEST */

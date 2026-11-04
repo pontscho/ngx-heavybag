@@ -58,7 +58,10 @@ CONF=$TESTS/heavybag-protocol-test.conf
 # paths follow a relocated checkout (the sed is a no-op on the default root).
 HB_RENDER_DIR=$ROOT/modules/ngx_http_heavybag/tests/corpus/.render
 mkdir -p "$HB_RENDER_DIR"
-hb_render() { local d="$HB_RENDER_DIR/$(basename "$1")"; sed "s#@HB_ROOT@#$ROOT#g" "$1" > "$d"; printf '%s' "$d"; }
+# shared mail-trust secret: rendered into waf_mail_trusted_secret (__HB_SECRET__)
+# and sent as X-WAF-Key by the probes below (same scheme as run-mailauth-fuzz.sh).
+SECRET='hbtest-mail-secret'
+hb_render() { local d="$HB_RENDER_DIR/$(basename "$1")"; sed -e "s#@HB_ROOT@#$ROOT#g" -e "s#__HB_SECRET__#$SECRET#g" "$1" > "$d"; printf '%s' "$d"; }
 CONF=$(hb_render "$CONF")
 TMP=$TESTS/corpus/.freeze-tmp
 ELOG=$SBX/logs/error-protocol.log
@@ -217,12 +220,12 @@ fi
 A12=$(curl -s -D - -o /dev/null http://127.0.0.1:28506/waf-mail-auth \
         -H 'Auth-Method: none' -H 'Auth-Protocol: smtp' -H 'Auth-SMTP-Helo: x' \
         -H 'Auth-SMTP-From: <a@b>' -H 'Auth-SMTP-To: <c@d>' \
-        -H 'X-WAF-Key: hbtest-mail-secret' \
+        -H "X-WAF-Key: $SECRET" \
         -H 'Client-IP: 203.0.113.7' 2>/dev/null | tr -d '\r')
 A12ok=$(curl -s -D - -o /dev/null http://127.0.0.1:28506/waf-mail-auth \
         -H 'Auth-Method: none' -H 'Auth-Protocol: smtp' -H 'Auth-SMTP-Helo: x' \
         -H 'Auth-SMTP-From: <a@b>' -H 'Auth-SMTP-To: <c@d>' \
-        -H 'X-WAF-Key: hbtest-mail-secret' \
+        -H "X-WAF-Key: $SECRET" \
         -H 'Client-IP: 203.0.113.50' 2>/dev/null | tr -d '\r')
 echo "    [A12 blocklisted Client-IP headers]"; printf '%s\n' "$A12" | sed 's/^/      /'
 a12bl=$(printf '%s' "$A12" | grep -i '^Auth-Status:' | tr -d '\r')
