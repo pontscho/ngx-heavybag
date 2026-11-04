@@ -738,8 +738,10 @@ ngx_http_heavybag_stat_http_block(ngx_http_heavybag_stat_shm_t *sh, ngx_uint_t i
  * cc16 is the caller's verdict country packed ISO-2 (0 when no geo lookup ran
  * or no record was found -- cc_bump is a no-op on 0), so the per-country
  * blocked counter is bumped HERE rather than re-pasted as an epilogue at every
- * block point. The detect arm deliberately keeps its own ctx->geo_done source
- * (lifecycle-02, see below): both arms are unchanged in behaviour.
+ * block point. Both arms book the country from this same verdict-derived
+ * cc16 (never from ctx->geo_done, which a rewrite-phase $waf_country read can
+ * fill without the verdict having seen it), so the per-country counters are
+ * booked at most once per request and only from the verdict's own geo result.
  */
 static ngx_int_t
 ngx_http_heavybag_finalize_decision(ngx_http_request_t *r, ngx_http_heavybag_ctx_t *ctx,
@@ -790,14 +792,15 @@ ngx_http_heavybag_finalize_decision(ngx_http_request_t *r, ngx_http_heavybag_ctx
              * lifecycle-02: a detect would-block is accounted as allowed, so
              * the per-country slot must see it too -- total++ (blocked=0),
              * mirroring the enforce path's cc_bump(...,1) and the allowed:
-             * label. ctx->geo_done means the reputation geo lookup produced a
-             * country (set == verdict.geo_valid before this point); cc16==0
-             * ({0,0} unknown) makes cc_bump a no-op for geo-less requests.
+             * label. The country is the caller's VERDICT country (cc16), the
+             * same source the enforce arm below and the allowed: epilogue use,
+             * NOT ctx->geo_done/ctx->country: a rewrite-phase $waf_country read
+             * fills those ahead of PREACCESS, so an allowlist/blocklist early
+             * return (verdict without a geo stage) would otherwise book a
+             * country the verdict never saw. cc16==0 ({0,0}: no lookup or no
+             * record) makes cc_bump a no-op.
              */
-            if (ctx->geo_done) {
-                ngx_http_heavybag_stat_cc_bump(sh,
-                    (uint16_t) ((ctx->country[0] << 8) | ctx->country[1]), 0);
-            }
+            ngx_http_heavybag_stat_cc_bump(sh, cc16, 0);
         }
 
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,

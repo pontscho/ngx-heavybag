@@ -191,6 +191,33 @@ rh=$(curl -s -o /dev/null -D - -A "$UA" "$D/index.html" | awk 'tolower($1)=="x-w
 rh=$(curl -s -o /dev/null -D - -A "$UA" "$A/index.html" | grep -ci x-waf-reason)
 [ "$rh" = 0 ] && ok "reason-header: absent when directive unset (default off)" || bad "reason-header: leaked on default-off vhost"
 
+echo "== per-country accounting follows the verdict's geo resolution =="
+G=http://127.0.0.1:28083
+# sum of the per-country total= column (plain format: "country XX total=N blocked=M")
+cctotal() { curl -s "$STAT/plain" | awk '$1=="country"{split($3,a,"="); s+=a[2]} END{print s+0}'; }
+GX='X-Forwarded-For: 8.8.8.8'
+
+# control: the geo-known client, allowed -> the verdict saw the country -> +1
+b=$(cctotal)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" -H "$GX" "$G/ccallow")
+[ "$code" = 200 ] && ok "geoacct control: allowed (200)" || bad "geoacct control code=$code"
+a=$(cctotal); assert_delta "geoacct control: allowed request books its country" "$b" "$a" 1
+
+# detect would-block on the static blocklist (verdict has no geo): no country
+b=$(cctotal); w=$(getcnt http_would_block_blocklist)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" -H "$GX" "$G/index.html")
+[ "$code" = 200 ] && ok "geoacct: detect blocklist passes (200)" || bad "geoacct plain code=$code"
+a=$(cctotal); assert_delta "geoacct: blocklist early return books no country" "$b" "$a" 0
+assert_delta "geoacct: would_block[blocklist] still counted" "$w" "$(getcnt http_would_block_blocklist)" 1
+
+# same, but \$waf_country was read in the REWRITE phase (fills ctx->country first):
+# the country the verdict never saw must NOT be booked, and the verdict is unchanged
+b=$(cctotal); w=$(getcnt http_would_block_blocklist)
+code=$(curl -s -o /dev/null -w '%{http_code}' -A "$UA" -H "$GX" -H 'X-CC-Read: 1' "$G/index.html")
+[ "$code" = 200 ] && ok "geoacct: rewrite-phase \$waf_country read, detect passes (200)" || bad "geoacct ccread code=$code"
+a=$(cctotal); assert_delta "geoacct: rewrite-phase read books no country (verdict never saw it)" "$b" "$a" 0
+assert_delta "geoacct: would_block[blocklist] unchanged by the rewrite read" "$w" "$(getcnt http_would_block_blocklist)" 1
+
 echo "== fake-bot (CIDR-verified crawler) =="
 # "Googlebot" classifies as crawler; the canonical client IP is the loopback
 # peer (no waf_trusted_proxy -> XFF ignored). The published range excludes
