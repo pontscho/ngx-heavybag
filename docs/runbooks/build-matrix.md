@@ -43,6 +43,10 @@ label `cmake/Tests.cmake`. It needs the CMake super-build done first
 - `ctest --test-dir build -R heavybag_build_matrix` (or `-L build`), or
 - `bash modules/ngx_http_heavybag/tests/run-build-matrix.sh` directly.
 
+The super-build's make parallelism defaults to the CPU count; override it at
+configure time with `cmake -B build -DHB_MAKE_JOBS=N` (`CMakeLists.txt`). The
+test timeout is 7200 s because a cold run can exceed 1800 s (`cmake/Tests.cmake`).
+
 Preflight: the script needs the extracted nginx source tree under
 `build/nginx_ext-prefix/src/nginx_ext` and reads the canonical configure
 arguments live from `sandbox/sbin/nginx -V`. If either is missing it exits 2,

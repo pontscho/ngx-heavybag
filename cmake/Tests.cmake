@@ -79,7 +79,10 @@ heavybag_add_test(heavybag_unit         unit/run-unit-tests.sh  LABELS "unit"   
 heavybag_add_test(heavybag_unit_coverage unit/run-unit-tests.sh LABELS "unit;coverage" TIMEOUT 900 ENV "HEAVYBAG_COVERAGE=1")
 
 # --- build-portability matrix (rebuilds the ./configure permutation trees) ---
-heavybag_add_test(heavybag_build_matrix run-build-matrix.sh     LABELS "build"               TIMEOUT 1800)
+# TIMEOUT here overrides `ctest --timeout`. A cold run (after a dependency bump
+# re-bootstraps and rebuilds OpenSSL once per variant tree) measured 1790 s on 16
+# cores and >1800 s on 3 CPUs; warm runs take 21-42 s.
+heavybag_add_test(heavybag_build_matrix run-build-matrix.sh     LABELS "build"               TIMEOUT 7200)
 
 # --- live-nginx integration + runtime (need the built sandbox + deployed .so) -
 heavybag_add_test(heavybag_config       run-config-tests.sh     LABELS "integration;config"  TIMEOUT 600  NGINX_BOUND)
