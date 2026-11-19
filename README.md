@@ -184,10 +184,16 @@ trees, no manual `./configure` dance.
     builds it in-tree via `--with-openssl=<src>`.
   - **zlib-ng 2.3.3** — built statically (`--zlib-compat --static`) and
     linked in place of the system dynamic zlib.
-  - **nginx 1.31.8** — configured with the full flag set and the heavybag module
-    as a dynamic add-on. 1.31.6 and 1.31.7 fix six advisories that affect the
-    previous pin 1.31.3, among them an HTTP/3 request-body injection
-    (CVE-2026-95101); the list is in `docs/threat-intel-sources.md` §8. The
+  - **nginx 1.31.9** — configured with the full flag set and the heavybag module
+    as a dynamic add-on. 1.31.9 (18 Nov 2026) fixes ten CVEs, several in
+    modules this build enables: HTTP/2 and HTTP/3 use-after-frees and an
+    HTTP/2 flow-control overflow, a mail proxy use-after-free, stream client
+    certificates verified against the default server instead of the
+    SNI-selected one, an `ssl_preread` ClientHello misparse, and an endless
+    loop reading a request body over SSL. 1.31.6 and 1.31.7 had fixed six
+    advisories that affect the earlier pin 1.31.3, among them an HTTP/3
+    request-body injection (CVE-2026-95101). Both lists are in
+    `docs/threat-intel-sources.md` §8. The
     module `.so` is ABI-bound to the nginx version it was built against, so
     rebuild it after every nginx bump (`docs/runbooks/build-matrix.md`).
     The earlier 1.31.3 release had already fixed three memory-corruption CVEs
@@ -1222,17 +1228,17 @@ histograms, `summary.json`) land under `tests/corpus/.stress/` (gitignored).
 <summary><b>Live production measurements (2026-06-23, example.com edge)</b></summary>
 
 Black-box load test of the **live** edge (`example.com` → 203.0.113.10, the
-Apache-cloaked heavybag; 6-core box, OpenSSL-QUIC build) from a separate host over
-a ~200 Mbit/s link (the box itself uplinks at 1 Gbit/s). Load tools: **h2load**
+Apache-cloaked heavybag, OpenSSL-QUIC build) from a separate host over a network
+path narrower than the box's own uplink. Load tools: **h2load**
 (H1/H2) and **vegeta** (open-loop constant arrival — the only one of the two that
 reports true percentiles). Target is `GET /` → nginx **404**: the full WAF
 pipeline runs at `http{}` level, then a static 404 with **no upstream**, so the
 numbers isolate WAF + nginx + TLS, not any backend. The body is 274 B, so
-bandwidth never binds (~91k req/s of 404s would be needed to fill the link).
+bandwidth never binds.
 Server CPU was sampled mid-load with `mpstat`/`pidstat` over ssh.
 
-**Rate limiter — real config `rate=30r/s burst=50 for_geo=HU`.** vegeta constant
-arrival; the generator's egress IP geolocates HU:
+**Rate limiter — `rate=30r/s burst=50` matching the generator's source.**
+vegeta constant arrival from a non-allowlisted public source:
 
 | arrival | passed (404) | 429-share (measured) | theory `(R−30)/R` |
 |---|---|---|---|
@@ -1244,33 +1250,31 @@ Steady pass-rate pins to exactly 30 r/s, `burst≈50` absorbs the initial spike,
 and p99 stays < 15 ms on **both** the pass and the 429 path even at 4× overload.
 
 **Capacity & WAF overhead (rate disabled, `enforce`, over the path).** vegeta
-sweep with mid-load CPU on the 6-core box:
+sweep:
 
-| target req/s | p50 | p99 | all-cpu (6c) | nginx CPU |
-|---|---|---|---|---|
-| 800 | 2.7 ms | 16.8 ms | ~8 % | ~50 %/600 |
-| 2 000 | 3.4 ms | 91 ms | 26 % | 131 %/600 |
-| 4 000 | 13.9 ms | 1.57 s | 47 % | 252 %/600 |
-| 8 000 | 58 ms | 1.42 s | 77 % | 406 %/600 |
-| ~10–11k | — | — | **~100 %** | CPU-saturated |
+| target req/s | p50 | p99 |
+|---|---|---|
+| 800 | 2.7 ms | 16.8 ms |
+| 2 000 | 3.4 ms | 91 ms |
+| 4 000 | 13.9 ms | 1.57 s |
+| 8 000 | 58 ms | 1.42 s |
 
-CPU-bound: all six cores peg around **10–11k req/s** (absolute h2load peak
-~43k req/s, deep in saturation with multi-second p99).
+The p99 tail past ~800 req/s is the generator path's, not the server's: server
+CPU stayed below saturation through the sweep.
 
-**CPU — `waf off` vs `enforce` at matched load** (same 6-core box, rate disabled,
-mid-load sample). `all-cpu` = mean busy across the 6 cores; `nginx` = summed
-worker CPU out of 600 % (= all cores):
+**CPU — `waf off` vs `enforce` at matched load** (rate disabled, mid-load
+sample). `nginx` = summed worker CPU, 100 % = one core:
 
-| req/s | all-cpu (off → on) | nginx CPU (off → on) | WAF Δ (nginx) |
-|---|---|---|---|
-| 1 000 | 10 % → 11 % | 51 % → 58 % | +7 % |
-| 2 000 | 20 % → 26 % | 104 % → 131 % | +27 % |
-| 4 000 | 42 % → 47 % | 218 % → 252 % | +34 % |
-| 6 000 | 50 % → 60 % | 272 % → 313 % | +41 % |
-| 8 000 | 58 % → 77 % | 296 % → 406 % | **+110 %** (~1.1 core) |
+| req/s | nginx CPU (off → on) | WAF Δ (nginx) |
+|---|---|---|
+| 1 000 | 51 % → 58 % | +7 % |
+| 2 000 | 104 % → 131 % | +27 % |
+| 4 000 | 218 % → 252 % | +34 % |
+| 6 000 | 272 % → 313 % | +41 % |
+| 8 000 | 296 % → 406 % | **+110 %** (~1.1 core) |
 
-The WAF's CPU cost is in the noise at low-mid load and only becomes material near
-saturation: ~+1 core of work at 8k req/s. (The 3k row is omitted — separate runs
+The WAF's CPU cost is in the noise at low-mid load and only becomes material at
+the top of the sweep: ~+1 core of work at 8k req/s. (The 3k row is omitted — separate runs
 with 8 s samples put its per-point delta inside measurement noise.)
 
 **True serving latency (loopback, path jitter removed).** Same sweep on the box
@@ -1290,9 +1294,9 @@ costs ~30 µs/request at the median** — lost in the ~0.7 ms TLS+nginx floor.
 loopback. Both ceilings are set by the **measurement path** (network jitter /
 co-located generator CPU), not by heavybag — p50/p95 stay ~3–5 ms well past them.
 
-**Verdict: heavybag is effectively free.** Capacity is bound by the hardware
-(6 cores ≈ 10k req/s of 404 fast-path) and the network path; the WAF itself adds
-~30 µs/req of latency and a fraction of a core until near saturation.
+**Verdict: heavybag is effectively free.** The generator path, not heavybag, was
+the bottleneck; the WAF itself adds ~30 µs/req of latency and a fraction of a
+core until near saturation.
 
 > Caveats: black-box over a bandwidth-limited path (the p99 tail is the path's,
 > not the server's); loopback CPU above ~2–4k req/s is confounded by the
@@ -1385,8 +1389,14 @@ tuning/test program (gap-analysis · detect-mode FP/TP replay · real-attack
 regression fixtures · geo/ASN tuning).
 
 **Corpus tooling.** The capture lives in `ngxlogs/access.log` (read-only, not
-tracked); all derived artifacts are IP-free and gitignored under
-`modules/ngx_http_heavybag/tests/corpus/`. The committable, core-perl tools are:
+tracked). The replay and regression fixtures committed under
+`modules/ngx_http_heavybag/tests/corpus/` (`replay-*.jsonl`,
+`regression-*.jsonl`, `fixtures/*.jsonl`) are derived from that edge log. They
+carry no client source addresses and are sanitized of the site's own domains,
+but they do contain attacker-supplied payload strings verbatim, including
+third-party IPs and hostnames embedded in exploit payloads. The per-IP feeds
+and reports (honeypot D) are IP-bearing and stay gitignored. The committable,
+core-perl tools are:
 
 - **`tools/extract-replay-vectors.pl`** — single read-only pass over the
   capture → the deduplicated, §3-class-labelled `replay-vectors.jsonl` attack

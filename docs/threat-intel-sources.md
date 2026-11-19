@@ -16,8 +16,8 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_match.c:ngx_http_heavybag_verified_bot_compile
   - cmake/Versions.cmake
 verified:
-  commit: 35d6bb3
-  date: 2026-11-04
+  commit: cc3d722
+  date: 2026-11-19
 links:
   - threat-model
   - honeypot-B-plan
@@ -150,8 +150,8 @@ sync` section, fed by the upstream facts below, landed in
 `modules/ngx_http_heavybag/lists/scanner-ua.list` (OWASP CRS + device-detector
 Security Checker), `modules/ngx_http_heavybag/lists/scanners.list` (CRS
 restricted files, dev-tool dotfiles) and `modules/ngx_http_heavybag/lists/args.list`
-(WordPress REST batch probe). A `2026-11 live-log mining (edge, 2026-06..11)`
-section, fed by the production-log pass in [[threat-model]] §8, landed in
+(WordPress REST batch probe). A `2026-11 live-log mining (2026-06..11)`
+section, fed by the live-log pass in [[threat-model]] §8, landed in
 ai-crawler, crawler, bot, scanner-ua and scanners. `bot.list` received only the
 live-log section and `args.list` only the upstream one.
 
@@ -229,7 +229,7 @@ Endpoints confirmed live on 2026-11-04 (researched, not code-verified):
 2026-11-04, not code-verified).** On the live edge no claimed-bot request
 reached the upstream with a 200, and about 99% of claimed-bot traffic came from
 the wrong ASN, almost all of it one GCP fleet (AS396982) rotating its UA
-([[threat-model]] §8). Under the production `waf_geo_whitelist HU LU` that
+([[threat-model]] §8). Under a narrow `waf_geo_whitelist` that
 traffic is already refused by the reputation stage, which runs before the
 fake-bot stage
 (`modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_preaccess_handler`),
@@ -251,8 +251,8 @@ after the swap (see [[qa-test-matrix]]).
 **Researched 2026-11-04, not code-verified.** Source:
 https://nginx.org/en/security_advisories.html. The build pins nginx in
 `cmake/Versions.cmake` (pin history and the per-version rebuild rule are in
-[[build-matrix]]). These advisories affect the previous pin, 1.31.3, and are
-fixed in 1.31.6 / 1.31.7:
+[[build-matrix]]). These advisories affect the earlier pin 1.31.3 and are
+fixed in 1.31.6 / 1.31.7 (the 1.31.8 pin carried these fixes):
 
 | CVE | What | Exposure condition |
 |---|---|---|
@@ -270,3 +270,29 @@ OpenSSL 3.5.0 or older, which the pinned OpenSSL (`cmake/Versions.cmake`) is
 not, so it matters only for a downstream build against an older OpenSSL. The
 remaining four depend on directives an operator may or may not use; check the
 advisory page against the deployed config.
+
+**nginx 1.31.9 (released 2026-11-18) fixes ten more CVEs.** Researched
+2026-11-19, not code-verified. Source: https://nginx.org/en/CHANGES. The pin is
+now 1.31.9 (`cmake/Versions.cmake`); the previous pin 1.31.8 predates every fix
+below.
+
+| CVE | What | Exposure condition |
+|---|---|---|
+| CVE-2026-125283 | buffer overflow with `try_files` + `alias` | config-dependent (`try_files` inside an `alias` location) |
+| CVE-2026-123007 | HTTP/2 flow-control window overflow | HTTP/2 enabled |
+| CVE-2026-123633 | HTTP/2 use-after-free when `worker_connections` is insufficient | HTTP/2 enabled |
+| CVE-2026-121810 | HTTP/3 use-after-free when `worker_connections` is insufficient | HTTP/3 enabled |
+| CVE-2026-123634 | resolver use-after-free with concurrent subrequest resolution | a `resolver` in use |
+| CVE-2026-113425 | mail proxy use-after-free | mail proxy enabled |
+| CVE-2026-120967 | stream: the SSL handshake ran synchronously, so client certificates were verified against the default server's config instead of the SNI-selected one | stream SSL with per-server client-cert verification |
+| CVE-2026-120993 | segfault with PROXY protocol v2 + dynamic SSL certificates | config-dependent |
+| CVE-2026-123640 | `ngx_stream_ssl_preread` ClientHello misparse, bypassing a security restriction | `ssl_preread` in use |
+| CVE-2026-118899 | endless loop while reading a request body over SSL | SSL enabled |
+
+The canonical configure line builds `--with-http_v2_module`,
+`--with-http_v3_module`, `--with-mail`, `--with-stream` and
+`--with-stream_ssl_preread_module` (`CMakeLists.txt`), so the HTTP/2, HTTP/3,
+mail, stream and `ssl_preread` entries are all in code this build ships; whether
+a given edge is exposed still depends on its config. 1.31.9 also rejects header
+lines without a colon and chunked bodies with too much framing overhead; those
+behaviour changes are listed with the pin in [[build-matrix]].

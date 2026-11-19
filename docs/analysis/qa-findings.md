@@ -54,7 +54,7 @@ confirmed-resolved items and their **current** anchors:
 - `observability-06` (Prometheus flag double-count) — **RESOLVED.** Distinct metric `heavybag_http_blocked_flag_total{flag=...}` `modules/ngx_http_heavybag/src/heavybag_status.c:786`. Original anchor `status.c:497-500` region.
 - `match` ReDoS foot-gun — **RESOLVED.** Bounded helper `ngx_http_heavybag_regex_exec` `modules/ngx_http_heavybag/src/heavybag_match.c:298` (PCRE2 match/depth limit) at both call sites — scanner/sig `modules/ngx_http_heavybag/src/heavybag_match.c:681` and `ua_classify` `modules/ngx_http_heavybag/src/heavybag_match.c:967`. The PCRE1 `#else` arm is now a build-time `#error` outside the unit-test TU (`modules/ngx_http_heavybag/src/heavybag_match.c:346`), so a shipped build can no longer fall back to the unbounded matcher.
 
-Dispositions the S9 fix series (the review artifacts under `reviews/`) changed:
+Dispositions the S9 fix series (from internal review notes, not in the repo) changed:
 
 - `authhttp-01` ("trust gate fail-open/safe intentional; no bypass") — **SUPERSEDED.** A loopback/unix peer alone no longer earns `Client-IP` trust: the caller must also present an `X-WAF-Key` that constant-time-matches `waf_mail_trusted_secret`, and every other case (no secret, key missing or mismatched, remote peer) judges the real connection peer `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_caller_trusted`, `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_secret_eq`. `waf_mail_failopen` (default on) still allows an *authenticated* request with a missing/unparseable `Client-IP`, by design `modules/ngx_http_heavybag/src/heavybag_authhttp.c:ngx_http_heavybag_authhttp_handler`.
 - `reputation-02` (unknown IP fails OPEN in block mode) — **UNCHANGED DEFAULT, now with an opt-in.** The default still lets a source with no geo record through (deny-list convention); the `unknown` token of `waf_flag_block` opts in to denying it `modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_flag_add`.
@@ -315,7 +315,7 @@ Partner decisions taken (AskUserQuestion): allowlist → `waf_allowlist_scope` d
 
 ### Fix round 1 — RUNTIME re-verification (live nginx) — 2026-06-17
 
-Beyond the build/unit verification above, the four Fix-round-1 *runtime* behaviors were exercised against a **live sandbox nginx** (freshly rebuilt + redeployed `.so`, mtime 10:35; OpenSSL did NOT rebuild) driving real HTTP/HTTPS requests and scraping the `waf_status` plain endpoint. **45/45 assertions PASS, 0 FAIL, 0 warn.** Harness lives under `.claude/tmp/reverify/` (confA-http.conf, confB-spoof.conf, driveA.sh, driveB.sh, test-ja4.list).
+Beyond the build/unit verification above, the four Fix-round-1 *runtime* behaviors were exercised against a **live sandbox nginx** (freshly rebuilt + redeployed `.so`, mtime 10:35; OpenSSL did NOT rebuild) driving real HTTP/HTTPS requests and scraping the `waf_status` plain endpoint. **45/45 assertions PASS, 0 FAIL, 0 warn.** The harness was ad-hoc (two nginx confs, two drive scripts, a JA4 list) and is not in the repo.
 
 **HTTP scenarios (confA, 27/27)** — distinct servers on 28081-28085, status scraped on 28085 (`waf off`, self-checked to not self-count):
 
@@ -337,7 +337,7 @@ Beyond the build/unit verification above, the four Fix-round-1 *runtime* behavio
 | `waf_spoof_block` **off** (observability-only) | `waf on` + `waf_spoof_block off`, UA=Chrome | `X-Spoof: 1` (still detected, `http_ua_spoofed` bumps) but **200** — not enforced; `blocked_spoof`/`would_block_spoof Δ=0` (stage gated off) |
 | spoof in **detect** mode | `waf detect` + `waf_spoof_block on`, UA=Chrome | **200** ×2 (overlay), `would_block_spoof Δ=2`, `blocked_spoof Δ=0`, `http_allowed Δ=2` |
 
-Runtime error log: only the 3 *expected* `open() ... nope-* failed` static-404 lines from the count-once redirect test; **no WAF errors, no crashes, no alloc failures**; clean worker exit (code 0). The runtime re-verification confirms the Fix-round-1 source is correct in a running server, not just at compile/unit level. (Harness untracked under `.claude/tmp/`; not part of the commit unless the partner wants it.)
+Runtime error log: only the 3 *expected* `open() ... nope-* failed` static-404 lines from the count-once redirect test; **no WAF errors, no crashes, no alloc failures**; clean worker exit (code 0). The runtime re-verification confirms the Fix-round-1 source is correct in a running server, not just at compile/unit level. (The harness was ad-hoc and is not in the repo.)
 
 ### Fix round 2 — P2 hardening — COMPLETED 2026-06-17
 
@@ -358,9 +358,9 @@ The six P2 backlog items (all `low`/`latent`, **none attacker-triggerable** with
 
 **Build landmine surfaced (worth recording):** the nginx source tree carries TWO objs variants — `objs/` (SSL, what `sandbox/sbin/nginx` is md5-identical to) and `objs-nossl/` (the top `Makefile`'s `modules` target delegates here). Deploying the wrong variant's `.so` to `sandbox/modules/` yields nginx `[emerg] module ... is not binary compatible`. Correct recipe for a module-only SSL rebuild: `make -f objs/Makefile modules` then copy `objs/ngx_http_heavybag_module.so` → `sandbox/modules/`. The plain `cmake --build --target heavybag_module` and the top-level `make modules` both build/refresh the *nossl* tree, not the SSL `.so` the sandbox runs.
 
-**Runtime re-verification (live sandbox nginx, freshly rebuilt + redeployed SSL `.so` mtime 13:03, binary-compatible):** harness under `.claude/tmp/reverify2/` (runtime.conf + 3 nginx-`-t` smoke configs + 6 lists + run.sh). **24/24 assertions PASS, 0 FAIL, 0 warn** — Part A config smoke (3 nginx -t cases incl. the sig-list shared-path abort) + Part B live runtime (#2 inheritance, #3 inline action, #4 JSON escape, #5 Prometheus rename, #6 ReDoS limit + positive + regression). Error log clean (only benign fs-404 `open()` noise from non-existent test paths); no WAF errors, no crashes, clean worker exit.
+**Runtime re-verification (live sandbox nginx, freshly rebuilt + redeployed SSL `.so` mtime 13:03, binary-compatible):** an ad-hoc harness, not in the repo (runtime.conf + 3 nginx-`-t` smoke configs + 6 lists + run.sh). **24/24 assertions PASS, 0 FAIL, 0 warn** — Part A config smoke (3 nginx -t cases incl. the sig-list shared-path abort) + Part B live runtime (#2 inheritance, #3 inline action, #4 JSON escape, #5 Prometheus rename, #6 ReDoS limit + positive + regression). Error log clean (only benign fs-404 `open()` noise from non-existent test paths); no WAF errors, no crashes, clean worker exit.
 
-**Not committed:** partner commits on main + pushes himself. Harness untracked under `.claude/tmp/reverify2/`.
+**Not committed:** the ad-hoc harness is not in the repo.
 
 **Out of scope (unchanged):** the 142-vector regression matrix (incl. dedicated rate/match unit harnesses) — the every-shipped-pattern ReDoS-positive sweep is that round's job; this round proved a representative positive set never clips. Deep-fuzz of the critic's un-probed surfaces (authhttp SMTP, spoof self-swap, reputation precedence, stat_cc saturation).
 
@@ -376,7 +376,7 @@ The last remaining `low`/observability backlog item. **No attacker impact** — 
 
 **Files touched:** `ngx_http_heavybag_module.c` (one 4-line block in `finalize_decision`).
 
-**Runtime re-verification (live sandbox nginx, SSL `.so` mtime 13:26, binary-compatible):** harness under `.claude/tmp/reverify-lc02/` (lc02.conf + run.sh). Geo resolved via `waf_trusted_proxy 127.0.0.1/32` + spoofed `X-Forwarded-For` against the project's own `geodb/location.db` (oracle `reference/geolookup.c`: 185.177.72.1→FR, 1.1.1.1→AU, 8.8.8.8→US). **7/7 assertions PASS:**
+**Runtime re-verification (live sandbox nginx, SSL `.so` mtime 13:26, binary-compatible):** an ad-hoc harness, not in the repo (lc02.conf + run.sh). Geo resolved via `waf_trusted_proxy 127.0.0.1/32` + spoofed `X-Forwarded-For` against the project's own `geodb/location.db` (oracle `reference/geolookup.c`: 185.177.72.1→FR, 1.1.1.1→AU, 8.8.8.8→US). **7/7 assertions PASS:**
 
 | Scenario | Setup | Observed |
 |---|---|---|
@@ -384,6 +384,6 @@ The last remaining `low`/observability backlog item. **No attacker impact** — 
 | control — enforce block bumps total AND blocked | `waf on`, scanner `/.env` ×3, XFF=1.1.1.1 (AU) | `country AU total Δ=3`, `blocked Δ=3` — enforce path unchanged; cc table + geo resolution proven real |
 | control — allowed request bumps total only | `waf on`, `/index.html` ×2, XFF=8.8.8.8 (US) | `country US total Δ=2`, `blocked Δ=0` — allowed: path correct |
 
-Error log clean (no WAF errors, no crashes, no alloc failures, clean worker exit). Harness untracked under `.claude/tmp/`.
+Error log clean (no WAF errors, no crashes, no alloc failures, clean worker exit). The harness is not in the repo.
 
 **Not committed:** partner commits on main + pushes himself.

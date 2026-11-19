@@ -13,8 +13,8 @@ sources:
   - modules/ngx_http_heavybag/tests/corpus/regression-headers.jsonl
   - reference/geolookup.c
 verified:
-  commit: 35d6bb3
-  date: 2026-11-04
+  commit: cc3d722
+  date: 2026-11-19
 links:
   - threat-intel-sources
   - honeypot-B-plan
@@ -24,15 +24,15 @@ links:
 # Edge Threat Model & Honeypot Analysis
 
 **Status:** living document · **Audience:** module authors + edge operators
-**Data source:** `ngxlogs/access.log` + `error.log` — the real production logs of
-this edge (`203.0.113.10`, `example.com`), **1,651,507 HTTP requests over
-~3 years 10 months** (2022-08-22 → 2026-06-13), captured **before** heavybag was
+**Data source:** `ngxlogs/access.log` + `error.log` — an edge log corpus
+(2022-2026; the docs call the host `203.0.113.10` / `example.com`),
+**1,651,507 HTTP requests**, captured **before** heavybag was
 ever enforcing. Every corpus number in §1–§5 is a **dated measurement of that
 frozen capture** (2026-06 snapshot), not a re-rendered value: `ngxlogs/` is
 gitignored (`.gitignore`), so the log is a local artifact that git — and the
 wiki's freshness check — cannot track, and a fresh clone cannot reproduce the
 figures. The headline request count was re-checked against the local file on
-2026-11-04 (its line count still matches). The later production log of the same
+2026-11-04 (its line count still matches). A later log of the same
 edge, with heavybag fields, is summarised separately in §8.
 
 > **Why this matters.** The heavybag's rule set is not guessed — it is *fitted to
@@ -50,7 +50,7 @@ edge, with heavybag fields, is summarised separately in §8.
 |---|---|
 | Total requests | 1,651,507 |
 | Distinct source IPs | 79,192 |
-| Span | 2022-08-22 → 2026-06-13 (~3y 10m) |
+| Span | 2022 → 2026 (~4 years) |
 | Nature | **pre-heavybag** — the legacy backend / catch-all answered everything |
 
 **This is a pure internet-scan profile.** The host is a small edge with no
@@ -67,7 +67,7 @@ really is hostile.
 | 2023 | 181,819 |
 | 2024 | 234,955 |
 | 2025 | 574,737 |
-| 2026 | 624,507 *(through 13 Jun — already past all of 2025)* |
+| 2026 | 624,507 *(through Jun — already past all of 2025)* |
 
 Roughly **doubling year over year** (2024→2025 +145%). Whatever rules we ship
 must assume scan volume keeps climbing.
@@ -184,8 +184,8 @@ parser-handled class — no heavybag action required.*
 ### 5.1 Sources
 
 79,192 distinct IPs, but heavily clustered. **Exclude the internal
-`10.0.0.0/24`** (`10.0.0.2`+`.6` = 120,438 requests, 118,796 of them 200)
-— that is local health-check / monitoring traffic, not a threat, and it also
+monitoring traffic** (a few private-range hosts, most of the 2xx responses)
+— that is local health-check traffic, not a threat, and it also
 accounts for much of the early TLS-on-plaintext 400 noise.
 
 The largest **external** aggressors (prime prefix-block candidates):
@@ -385,7 +385,7 @@ The procedure (reproducible, read-only on the log, libc + core-perl only —
    classification, baseline, and §4 malformed detection as the path extractor.
    **hostile** = kept non-baseline path requests (§3 classes + uncatalogued);
    **junk** = §4 protocol-junk (mass TLS/port-scan signal, a *separate* column);
-   the internal `10.0.0.0/24` and the legit baseline are excluded from
+   the internal monitoring hosts and the legit baseline are excluded from
    hostility ranking. Raw + hostile are shown side by side so a coarse lever's
    collateral on legitimate traffic stays visible (partner decision).
 3. **Join + rank** (`modules/ngx_http_heavybag/tools/honeypot-d-report.pl`): pipes the distinct IPs through
@@ -442,28 +442,25 @@ The levers, by surgical precision:
 ## 7. Limitations & caveats
 
 - **Pre-heavybag corpus.** heavybag never enforced during capture; every `.php` 200
-  (incl. the historic `/xleet-shell.php` hit) reflects the *old* backend /
-  catch-all, **not** a heavybag bypass. The `/xleet-shell.php` 200 may indicate a
-  past compromise of the legacy infra — an infrastructure question, not a heavybag
-  one.
+  reflects the *old* backend / catch-all, **not** a heavybag bypass.
 - **Signature, not content.** `scanners.list` matches paths; it cannot catch a
   random-named webshell (`/xleet-shell.php` is caught only by the `\.php`
   extension rule, not by name).
 - **Spoofed-browser blind spot** (§5.2): UA classification misses offensive
   tools hiding behind fake browser strings — covered only by path signatures
   and IP reputation.
-- **Internal traffic** (`10.0.0.0/24`) must be excluded from any
+- **Internal monitoring traffic** must be excluded from any
   attacker-derived tuning, or it pollutes the geo/ASN and volume stats.
 - **Numbers age.** Traffic doubles yearly (§1.1); re-run the gap-analysis (A)
   periodically — the §1–§6 corpus figures are a 2026-06 snapshot.
 
 ---
 
-## 8. Live production log, 2026-11 mining pass
+## 8. Live edge log, 2026-11 mining pass
 
 **Provenance: researched 2026-11-04 by remote aggregation, not code-verified and
-not reproducible from this repo.** The log lives on the production host at `/opt/edge/dataset/log/nginx/access.log` (~1 GB, ~4.0M
-lines). It holds two eras: ~1.65M old-format lines (2022-08 → 2026-06, the same
+not reproducible from this repo.** The log lives on the author's edge host
+(~1 GB, ~4.0M lines). It holds two eras: ~1.65M old-format lines (2022-08 → 2026-06, the same
 period as the §1 corpus) and ~2.35M new-format lines (2026-06 → 2026-11-04)
 whose `log_format` adds heavybag's `waf=` / `type=` / `cc=` / `asn=` / `spoofed=`
 / `ja4=` fields. The method: a perl aggregation ran on the remote host over ssh
@@ -472,8 +469,8 @@ working report was ephemeral (a `/tmp` scratch file) and is summarised here, not
 linked.
 
 Findings that change how the numbers in this page should be read (all
-researched 2026-11-04, including the reading of the production config; the
-inline anchors show where the module acts, not what production runs):
+researched 2026-11-04; the inline anchors show where the module acts, not how
+any particular edge is configured):
 
 - **A 404 is a weak scanner signal on this edge.** The edge answers `/` itself
   with 404, so a high per-client 404 rate does not, by itself, separate a scanner
@@ -489,22 +486,22 @@ inline anchors show where the module acts, not what production runs):
   published-range list for the class, and these names were not in
   `ai-crawler.list` before the 2026-11 sync. The same blind spot as §5.2, from
   the other side.
-- **`scanner_*` blocks are rare in the new-format era, and that is the
-  production config, not a coverage gap.** 309 `scanner_*` blocks against
-  ~100k scanner-typed lines. Production runs `enforce` with
-  `waf_geo_whitelist HU LU` at `http` level and `waf_bot_block on`. The geo
+- **`scanner_*` blocks are rare in the new-format era, and that reflects the
+  config, not a coverage gap.** 309 `scanner_*` blocks against
+  ~100k scanner-typed lines. With a `waf_geo_whitelist` active, the geo
   whitelist is part of the reputation stage, which runs first in PREACCESS,
   ahead of the UA, fake-bot and path stages
   `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_preaccess_handler`,
   `modules/ngx_http_heavybag/src/heavybag_reputation.c:ngx_http_heavybag_reputation_check`.
-  So a foreign scanner is logged `waf=geo_whitelist` (a 404), and
-  `scanner_ua` / `scanner_path` can fire only for HU/LU sources. Do not read
-  the `scanner_*` count as a coverage figure.
+  So a scanner from outside the whitelisted countries is logged
+  `waf=geo_whitelist`, and `scanner_ua` / `scanner_path` can fire only for
+  whitelisted sources. Do not read the `scanner_*` count as a coverage figure
+  on a geo-whitelisted edge.
 - **Rewrite-phase `return`s bypass the WAF.** heavybag judges in PREACCESS
   `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_postconfiguration`,
   so a `return` in a server or location block (rewrite phase) finalizes the
-  request before any verdict. On this edge that covers the port-80 301, the
-  direct-IP guard, the app locations and the app-b `/`. A prepared fix
+  request before any verdict. Typical cases are an http→https 301, a direct-IP
+  guard, or a location that answers with a fixed `return`. A fix
   pattern that keeps the redirect but routes it through PREACCESS:
   `error_page 418 =301 <url>; recursive_error_pages on; try_files /__waf_no_such_path__ =418;`.
   `try_files` runs in PRECONTENT, after PREACCESS, so the verdict happens
@@ -515,10 +512,10 @@ inline anchors show where the module acts, not what production runs):
   request reached the upstream with a 200. About 99% of claimed-bot traffic
   came from the wrong ASN, almost all of it a single GCP fleet (AS396982)
   rotating UAs. Per-operator CIDR/ASN verification was therefore judged not
-  worth building under the HU/LU whitelist; revisit it if the whitelist is
-  relaxed ([[threat-intel-sources]] §7.2).
+  worth building while a narrow geo whitelist is in force; revisit it if the
+  whitelist is relaxed ([[threat-intel-sources]] §7.2).
 
-The pass fed the `2026-11 live-log mining (edge, 2026-06..11)` sections of
+The pass fed the `2026-11 live-log mining (2026-06..11)` sections of
 `modules/ngx_http_heavybag/lists/ai-crawler.list`,
 `modules/ngx_http_heavybag/lists/crawler.list`,
 `modules/ngx_http_heavybag/lists/bot.list`,

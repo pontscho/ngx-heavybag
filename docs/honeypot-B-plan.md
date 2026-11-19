@@ -140,8 +140,8 @@ heavybag module matches `r->uri`, so authority-form adds no coverage).
   **skip-and-count** — never let it inject sibling headers (which would pollute
   dimension isolation).
 - **No fixture/corpus byte is ever passed as a shell word or interpolated into a
-  command line** (security-officer S2) — belongs next to the "purity is the only
-  file writer" rule in §7.
+  command line** (security-officer S2) — belongs next to the file-writer rule
+  in §7.
 - The dedup `count` is irrelevant for *sending* (one send per unique vector);
   keep it only to weight the coverage report by volume.
 
@@ -232,11 +232,13 @@ are committable.
 - Sandbox nginx already built with the heavybag `.so` (no `.c` change in B). If the
   module must be rebuilt: cmake `--build --target heavybag_module`, mind the OpenSSL
   rebuild trap (touch `ssl.h` after reconfigure).
-- `purity` is the only file writer; `ngxlogs/` stays read-only; docker forbidden.
+- Files are written only through the project's file-editing tooling, never by
+  ad-hoc shell redirection; `ngxlogs/` stays read-only; docker forbidden.
 - **No fixture/corpus byte ever reaches a shell word or a command line**
   (security-officer S2).
-- `modules/ngx_http_heavybag/tests/corpus/` derivatives (incl. B's reports + fixtures)
-  stay gitignored; the harness script + replay conf ARE committable.
+- B's per-run reports stay gitignored. The replay fixtures were later committed
+  (sanitized of the site's own domains; see `.gitignore`), alongside the harness
+  script and replay conf.
 
 ---
 

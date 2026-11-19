@@ -18,8 +18,8 @@ sources:
   - modules/ngx_http_heavybag/src/heavybag_authhttp.c
   - modules/ngx_http_heavybag/tests/unit/test-authhttp.c
 verified:
-  commit: 35d6bb3
-  date: 2026-11-04
+  commit: cc3d722
+  date: 2026-11-19
 links:
   - qa-findings
   - qa-test-matrix
@@ -58,7 +58,7 @@ links:
 
 **Headline gap:** 9 of 11 translation units have no unit tests — including the two highest-risk classes (geo memory-layout, shared-memory concurrency in rate/reputation/status).
 
-### Current unit-test coverage (re-checked at 35d6bb3)
+### Current unit-test coverage (re-checked at cc3d722)
 
 The table above is the 2026-06-17 recon and stays as recorded. Since then the
 test-matrix round ([[qa-test-matrix]]) and the S9 fix series closed most of the

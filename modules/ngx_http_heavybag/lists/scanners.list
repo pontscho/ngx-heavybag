@@ -170,12 +170,11 @@ phpunit/.{0,40}eval-stdin\.php
 (^|/)netlify\.toml$
 (^|/)vercel\.json$
 
-# ---- 2026-11 live-log mining (edge, 2026-06..11) --------------------------
-# Probe families seen from 20-200+ IPs each with 0% 200-rate on the live edge
-# (/tmp/logmine/report.md s2). The edge legitimately serves /app.css, /app.json,
-# /app-*.js, /hmr-runtime.js, /api/{health,users,session,login}, /app-b/*,
-# /webapp*, /app-c/*, /static/app-d.*, /fonts/*: NONE of the patterns
-# below match those (checked with a PCRE sanity run), so bare /app.js,
+# ---- 2026-11 live-log mining (2026-06..11) --------------------------
+# Probe families seen from 20-200+ IPs each with 0% 200-rate on the live edge.
+# The patterns below were checked (PCRE sanity run) not to match the edge's
+# legitimately served paths. Common app-bundle and API paths collide with real
+# sites, so bare /app.js,
 # /index.js, /app.json and generic app routes (/admin, /graphql, /mcp, ...) are
 # deliberately NOT listed. Already covered, not re-added: xmlrpc.php (.php
 # catch-all), wlwmanifest, /etc/passwd, /.env* variants (incl. %2eenv, which

@@ -86,7 +86,7 @@ RootEvidence
 InfoGuardDisclosureResearch
 recon-(crawler|engine)
 
-# -- 2026-11 live-log mining (edge, 2026-06..11) --------------------------
+# -- 2026-11 live-log mining (2026-06..11) --------------------------
 # Self-identifying scanners / probe tools seen as type=regular with 50-100% 404.
 # Skipped on purpose: ForestEngine (also appended to forged Chrome UAs, ambiguous),
 # fasthttp / Custom-AsyncHttpClient / WordPress/6.4.3 (too generic), and

@@ -9,12 +9,13 @@ sources:
   - modules/ngx_http_heavybag/config
   - cmake/Versions.cmake
 verified:
-  commit: 35d6bb3
-  date: 2026-11-04
+  commit: cc3d722
+  date: 2026-11-19
 links:
   - threat-model
   - mail-authhttp
   - build-matrix
+  - data-file-updates
   - threat-intel-sources
   - stress-testing
   - stress-campaign
@@ -125,6 +126,9 @@ drift apart on inheritance or validation order.
   `waf_mail_failopen`, counter accounting, `Auth-Status` outputs.
 - [[build-matrix]] — runbook for the build-portability matrix
   (`heavybag_build_matrix`) and the `heavybag_module` self-heal.
+- [[data-file-updates]] — runbook for updating lists, the JA4 table and the
+  geo DB on a running server (formats, reload-only model, repo → server
+  procedure, geo DB cron).
 - [[threat-model]] — empirical attack-surface analysis and the data-driven
   rule-tuning loop (A–D).
 - [[threat-intel-sources]] — external feeds for the header-attack fixtures.
@@ -138,6 +142,4 @@ drift apart on inheritance or validation order.
 - [[qa-subunit-inventory]] — per-translation-unit risk and unit-test coverage.
 
 > Build, configuration, and the full directive reference are in the
-> repo-root `README.md` (linked, not duplicated here). The S6–S8 code and
-> security review reports and the fix task list sit under `reviews/`
-> as review artifacts, outside the wiki's page contract.
+> repo-root `README.md` (linked, not duplicated here).

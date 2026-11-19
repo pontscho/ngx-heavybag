@@ -27,8 +27,8 @@
  *     and the multi-Cookie ngx_list walk are likewise module.c request-path
  *     logic, not match.c -> integration (Phase 6).
  *   - The ReDoS *timing* proof (bounded 0.020s vs an unbounded ~2^40-step hang)
- *     belongs to the runtime layer (Fix-round-2 .claude/tmp/reverify2 measured
- *     it). Here we assert the OUTCOME the limit guarantees: catastrophic input
+ *     belongs to the runtime layer (a Fix-round-2 ad-hoc harness, not in the
+ *     repo, measured it). Here we assert the OUTCOME the limit guarantees: catastrophic input
  *     fails to a no-match (security fail-open) and terminates, while a legit
  *     match still fires (the limit never clips it).
  *   - The nginx-glue tail (ua_list_compile / ja4_list_compile /

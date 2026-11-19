@@ -211,21 +211,22 @@ above. Driven from a separate host with [`tests/live/live-slo-path.sh`](../modul
 h2load used for the closed-loop concurrency peak.
 
 **Machine / setup.** Target `example.com` → `203.0.113.10` (Apache-cloaked
-heavybag, 6-core box, OpenSSL-QUIC build). Generator on a separate host, ~200
-Mbit/s gen↔box path (box uplinks at 1 Gbit/s). Target request `GET /` → nginx
+heavybag, OpenSSL-QUIC build). Generator on a separate host, over a network
+path narrower than the box's own uplink. Target request `GET /` → nginx
 **404** (full WAF pipeline at `http{}` level, then static 404, **no upstream**),
-body 274 B → bandwidth never binds (~91k req/s of 404s would fill the link).
+body 274 B, so bandwidth never binds.
 Server CPU sampled mid-load with `mpstat -P ALL` / `pidstat -C nginx`.
 
-**Deployed config at test time** (hardened vs the repo sample): `waf on`,
-`waf_rate_limit rate=30r/s burst=50 for_geo=HU` + `rate=10r/s burst=15` default,
-`waf_geo_whitelist HU LU`, `waf_allowlist 127.0.0.1/32` + `10.0.0.0/24`.
-Capacity/latency legs ran with the two `waf_rate_limit` lines temporarily
+**Config at test time** (hardened vs the repo sample): `waf on`, a per-IP
+`waf_rate_limit` that matched the generator's source (30 r/s, `burst=50`), a
+geo whitelist, and a loopback/internal `waf_allowlist`.
+Capacity/latency legs ran with the `waf_rate_limit` lines temporarily
 commented (rate off) so throughput was not capped at 30 r/s; restored after.
 
-## Rate limiter (real config, public path, HU egress)
+## Rate limiter (public path)
 
-vegeta constant arrival; the generator's public egress geolocates HU → 30 r/s rule.
+vegeta constant arrival from a non-allowlisted public source that hits the
+30 r/s rule.
 
 | arrival | passed (404) | 429-share (measured) | theory `(R−30)/R` |
 |---|---|---|---|
@@ -238,19 +239,19 @@ on both the pass and the 429 path even at 4× overload. Surgical.
 
 ## Capacity & WAF overhead (rate off, public path, vegeta sweep)
 
-| target req/s | p50 | p99 | all-cpu (6c) | nginx CPU | p99≤25 ms |
-|---|---|---|---|---|---|
-| 800 | 2.7 ms | 16.8 ms | ~8 % | ~50 %/600 | ✅ (SLO knee) |
-| 1 000 | 3.4 ms | 47 ms | 11 % | 58 %/600 | ❌ |
-| 2 000 | 3.4 ms | 91 ms | 26 % | 131 %/600 | ❌ |
-| 4 000 | 13.9 ms | 1.57 s | 47 % | 252 %/600 | ❌ |
-| 6 000 | 29 ms | 2.42 s | 60 % | 313 %/600 | ❌ |
-| 8 000 | 58 ms | 1.42 s | 77 % | 406 %/600 | ❌ |
-| ~10–11k | — | — | ~100 % | CPU-saturated | — |
+| target req/s | p50 | p99 | p99≤25 ms |
+|---|---|---|---|
+| 800 | 2.7 ms | 16.8 ms | ✅ (SLO knee) |
+| 1 000 | 3.4 ms | 47 ms | ❌ |
+| 2 000 | 3.4 ms | 91 ms | ❌ |
+| 4 000 | 13.9 ms | 1.57 s | ❌ |
+| 6 000 | 29 ms | 2.42 s | ❌ |
+| 8 000 | 58 ms | 1.42 s | ❌ |
 
-CPU-bound: six cores peg at ~10–11k req/s (absolute h2load closed-loop peak
-~43k req/s deep in saturation). `waf off` vs `enforce` at equal rate differ by
-only ~+20–40 % nginx CPU, widening to ~+1 core near 8k.
+The p99 tail past the knee is the generator path's, not the server's: server
+CPU stayed well below saturation through the sweep. `waf off` vs `enforce` at
+equal rate differ by only ~+20–40 % nginx CPU, widening to about one extra core
+at the top of the sweep.
 
 ## True serving latency (loopback, path jitter removed)
 
@@ -283,12 +284,12 @@ small-sample path jitter, not server cost.
 - **Operating point @ p99 ≤ 25 ms:** ~800 req/s over the path, ~2 000 req/s on
   loopback. Both ceilings are set by the **measurement path** (network jitter /
   co-located generator CPU), **not** by heavybag — p50/p95 stay ~3–5 ms past them.
-- **Verdict: heavybag is effectively free.** Capacity is bound by the hardware
-  (6 cores ≈ 10k req/s of 404 fast-path) and the network path; the WAF adds
-  ~30 µs/req latency and a fraction of a core until near saturation.
-- **Allowlist short-circuits the whole WAF.** `waf_allowlist 127.0.0.1/32` +
-  `10.0.0.0/24` means loopback and the internal subnet (incl. the gen host)
-  bypass **all** checks incl. rate limiting — matched on the connection peer.
+- **Verdict: heavybag is effectively free.** The generator path, not heavybag,
+  was the bottleneck; the WAF adds ~30 µs/req latency and a fraction of a core
+  until near saturation.
+- **Allowlist short-circuits the whole WAF.** An allowlisted source (loopback,
+  an internal subnet) bypasses **all** checks incl. rate limiting — matched on
+  the connection peer.
   Consequence for testing: the **rate/WAF path is only exercisable from a
   non-allowlisted source** (the public path). Loopback runs measure the WAF only
   if the loopback IP is not allowlisted.

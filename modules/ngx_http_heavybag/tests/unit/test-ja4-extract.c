@@ -452,7 +452,7 @@ CTEST(ja4x, error_path_frees_ext_ids)
  * test-ja4.c feeds straight to the build core, expected
  * t13d1516h2_8daaf6152771_e5627efa2ab1) -- NOT invented. Its cipher hash
  * 8daaf6152771 is the same JA4_b carried by the Chromium row of
- * .claude/tmp/ja4plus-mapping.csv (t13d1516h2_8daaf6152771_02713d6af862), i.e.
+ * the FoxIO ja4plus mapping CSV (t13d1516h2_8daaf6152771_02713d6af862), i.e.
  * this canonical hello shares Chrome's cipher list; the JA4_c differs only in
  * the extension/sigalg set, which the CSV does not carry as raw bytes (and we
  * refuse to fabricate per-browser ext lists). Here the raw bytes pass through

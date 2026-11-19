@@ -13,13 +13,14 @@ sources:
   - CMakeLists.txt
   - cmake/Versions.cmake
 verified:
-  commit: 35d6bb3
-  date: 2026-11-04
+  commit: cc3d722
+  date: 2026-11-19
 links:
   - overview
   - qa-test-matrix
   - qa-findings
   - threat-intel-sources
+  - data-file-updates
 ---
 
 # Build-portability matrix (heavybag_build_matrix)
@@ -116,9 +117,14 @@ re-extracted the source and wiped them. Bootstrapping means
 `./configure <transformed args> --builddir=<dir>` followed by the generated
 OpenSSL `ssl.h` touch-guard, so the next `make` does not start a doomed full
 OpenSSL rebuild `modules/ngx_http_heavybag/tests/run-build-matrix.sh:bootstrap`,
-`CMakeLists.txt`. Each tree's configure and build output goes to
-`<builddir>.configure.log` / `<builddir>.modules.log` in the nginx source tree.
-Read those when an entry FAILs.
+`CMakeLists.txt`. A variant tree that exists is re-bootstrapped the same way
+when the addon `config` is newer than its `Makefile`, because the
+`ngx_module_libs` decision (the `-lcrypto` gate above) is baked in at configure
+time; the canonical `objs/` tree is never re-configured by the matrix
+`modules/ngx_http_heavybag/tests/run-build-matrix.sh:build_tree`. Each tree's
+configure and build output goes to `<builddir>.configure.log` /
+`<builddir>.modules.log` in the nginx source tree. Read those when an entry
+FAILs.
 
 ## `objs-nopcre`: an expected abort
 
@@ -149,9 +155,10 @@ start, because `nginx -s reload` does not reload module code `CMakeLists.txt`.
 
 ## Dependency pins and nginx upgrades
 
-The super-build pins nginx 1.31.8, OpenSSL 3.5.9 and PCRE2 10.49 (raised from
-1.31.3 / 3.5.7 / 10.47 for the advisories in [[threat-intel-sources]] §8)
-`cmake/Versions.cmake`. Bumping one is a one-line edit of its `PKG_*_VERSION`
+The super-build pins nginx 1.31.9, OpenSSL 3.5.9, PCRE2 10.49 and zlib-ng
+2.3.3 `cmake/Versions.cmake`. nginx went 1.31.3 → 1.31.8 → 1.31.9 and OpenSSL /
+PCRE2 went 3.5.7 / 10.47 → 3.5.9 / 10.49, each step for the advisories in
+[[threat-intel-sources]] §8; the 1.31.9 bump changed only the nginx pin. Bumping one is a one-line edit of its `PKG_*_VERSION`
 there; the tarball SHA256 is resolved on the next configure
 `cmake/Versions.cmake:resolve_sha256`.
 
@@ -166,6 +173,8 @@ The source audit for the 1.31.8 bump: the module uses no `ngx_http_script_*`,
 `waf_mail_auth` and `waf_status` setters
 `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_set_mail_auth`,
 `modules/ngx_http_heavybag/src/ngx_http_heavybag_module.c:ngx_http_heavybag_set_status`.
+The 1.31.9 bump needed no module source change: it built clean and the full
+suite passed (2026-11-19, `cmake/Tests.cmake`).
 
 nginx behaviour changes between 1.31.3 and 1.31.8 that an edge config can
 notice (researched 2026-11-04, not code-verified):
@@ -175,6 +184,16 @@ notice (researched 2026-11-04, not code-verified):
 - `working_directory` is resolved relative to the prefix, and an invalid path
   is rejected at config load instead of at run time.
 - HTTP/2 uses the RFC 9218 priority scheme.
+
+Added in 1.31.9 (researched 2026-11-19 from https://nginx.org/en/CHANGES, not
+code-verified):
+
+- A request header line without a colon is rejected.
+- A chunked request body with too much framing overhead is rejected.
+
+Deploying a bump means swapping the nginx binary and the rebuilt module
+together and restarting; the restart-versus-reload rules are in
+[[data-file-updates]].
 
 The phase that introduced the matrix, and the findings it nets, are recorded in
 [[qa-test-matrix]] and [[qa-findings]].

@@ -41,7 +41,7 @@ IsonSearchBot
 ListGemBot
 WatchForBot
 
-# -- 2026-11 live-log mining (edge, 2026-06..11) --------------------------
+# -- 2026-11 live-log mining (2026-06..11) --------------------------
 # Self-identifying indexers / survey crawlers (bot.list holds monitor/SEO tools).
 Meta-WebIndexer
 NetcraftSurveyAgent
